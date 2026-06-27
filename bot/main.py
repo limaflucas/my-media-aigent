@@ -21,18 +21,48 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Read configuration
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+def get_secret(key: str, default: str = None) -> str | None:
+    """
+    Reads a secret from:
+    1. A file path specified in an env variable ending with _FILE (e.g. TELEGRAM_BOT_TOKEN_FILE).
+    2. The standard Docker secrets path (/run/secrets/key_lowercase).
+    3. The environment variable itself (direct fallback).
+    """
+    # 1. Check for filename pointer in env (e.g. TELEGRAM_BOT_TOKEN_FILE)
+    file_path = os.getenv(f"{key}_FILE")
+    if file_path and os.path.exists(file_path):
+        try:
+            with open(file_path, "r") as f:
+                return f.read().strip()
+        except Exception as e:
+            logger.error(f"Failed to read secret from file path {file_path}: {e}")
+
+    # 2. Check docker secrets directory (/run/secrets/key_lowercase)
+    secret_name = key.lower()
+    docker_secret_path = f"/run/secrets/{secret_name}"
+    if os.path.exists(docker_secret_path):
+        try:
+            with open(docker_secret_path, "r") as f:
+                return f.read().strip()
+        except Exception as e:
+            logger.error(f"Failed to read Docker secret from {docker_secret_path}: {e}")
+
+    # 3. Fallback to direct environment variable
+    return os.getenv(key, default)
+
+# Read configuration using the secret helper
+TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN")
 OVERSEERR_URL = os.getenv("OVERSEERR_URL", "http://localhost:5055")
-OVERSEERR_API_KEY = os.getenv("OVERSEERR_API_KEY")
+OVERSEERR_API_KEY = get_secret("OVERSEERR_API_KEY")
 
 if not TELEGRAM_BOT_TOKEN:
-    logger.error("TELEGRAM_BOT_TOKEN environment variable is not set!")
+    logger.error("TELEGRAM_BOT_TOKEN could not be loaded from environment or secrets!")
 if not OVERSEERR_API_KEY:
-    logger.error("OVERSEERR_API_KEY environment variable is not set!")
+    logger.error("OVERSEERR_API_KEY could not be loaded from environment or secrets!")
 
 # Initialize Overseerr Client
 overseerr = OverseerrClient(OVERSEERR_URL, OVERSEERR_API_KEY)
+
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sends a welcoming message explaining the bot's features."""
