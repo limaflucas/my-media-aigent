@@ -1,6 +1,13 @@
 import os
 import re
 import logging
+
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -54,14 +61,20 @@ def get_secret(key: str, default: str = None) -> str | None:
 TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN")
 OVERSEERR_URL = os.getenv("OVERSEERR_URL", "http://localhost:5055")
 OVERSEERR_API_KEY = get_secret("OVERSEERR_API_KEY")
+OVERSEERR_SSL_VERIFY = os.getenv("OVERSEERR_SSL_VERIFY", "true").lower() in ("true", "1", "yes")
 
 if not TELEGRAM_BOT_TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN could not be loaded from environment or secrets!")
 if not OVERSEERR_API_KEY:
     logger.error("OVERSEERR_API_KEY could not be loaded from environment or secrets!")
 
+if not OVERSEERR_SSL_VERIFY:
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    logger.info("SSL certificate verification is disabled for Overseerr/Seerr API calls.")
+
 # Initialize Overseerr Client
-overseerr = OverseerrClient(OVERSEERR_URL, OVERSEERR_API_KEY)
+overseerr = OverseerrClient(OVERSEERR_URL, OVERSEERR_API_KEY, ssl_verify=OVERSEERR_SSL_VERIFY)
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -222,25 +235,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Direct TMDB lookup bypasses search
+        # Direct TMDB lookup bypasses search and requests media directly
         if media_info.get("source") == "tmdb_url":
             tmdb_id = media_info["tmdb_id"]
             media_type = media_info["media_type"]
             
-            # Fetch details
-            if media_type == "movie":
-                details = overseerr.get_movie_details(tmdb_id)
-            else:
-                details = overseerr.get_tv_details(tmdb_id)
-                
-            if not details:
+            await processing_msg.edit_text(f"⏳ Submitting request for TMDB ID **{tmdb_id}** ({media_type})...", parse_mode="Markdown")
+            
+            result = overseerr.request_media(media_type, tmdb_id)
+            if result:
                 await processing_msg.edit_text(
-                    f"❌ Could not retrieve details for direct TMDB ID `{tmdb_id}` ({media_type}) from Seerr.",
+                    f"🎉 **Request Submitted Successfully!**\n\n"
+                    f"TMDB ID **{tmdb_id}** ({media_type}) has been requested in Seerr.",
                     parse_mode="Markdown"
                 )
-                return
-                
-            await show_item_details_from_dict(processing_msg, media_type, tmdb_id, details)
+            else:
+                await processing_msg.edit_text(
+                    f"❌ **Failed to request TMDB ID {tmdb_id}.**\n\n"
+                    "Please verify Overseerr API connection or logs.",
+                    parse_mode="Markdown"
+                )
             return
 
         # Regular Title Search
@@ -286,23 +300,41 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     action = parts[0]
 
     if action == "sel":
-        # Select search item
+        # Select search item (directly submit request to bypass broken movie/tv details endpoints)
         media_type = parts[1]
         tmdb_id = int(parts[2])
 
-        if media_type == "movie":
-            details = overseerr.get_movie_details(tmdb_id)
+        # Extract title from the clicked button text
+        title = "Selected Item"
+        if query.message.reply_markup and query.message.reply_markup.inline_keyboard:
+            for row in query.message.reply_markup.inline_keyboard:
+                for button in row:
+                    if button.callback_data == data:
+                        title = button.text
+                        break
+        
+        # Strip emoji from title if present
+        if title.startswith("🎬") or title.startswith("📺"):
+            title = title[2:].strip()
+
+        await query.message.edit_text(f"⏳ Submitting request for **{title}**...", parse_mode="Markdown")
+
+        result = overseerr.request_media(media_type, tmdb_id)
+        if result:
+            await query.message.edit_text(
+                f"🎉 **Request Submitted Successfully!**\n\n"
+                f"**{title}** has been requested in Seerr.",
+                parse_mode="Markdown"
+            )
         else:
-            details = overseerr.get_tv_details(tmdb_id)
-
-        if not details:
-            await query.message.edit_text("❌ Error: Could not fetch details for this item.")
-            return
-
-        await show_item_details_from_dict(query.message, media_type, tmdb_id, details)
+            await query.message.edit_text(
+                f"❌ **Failed to request {title}.**\n\n"
+                "Please verify Overseerr API connection or logs.",
+                parse_mode="Markdown"
+            )
 
     elif action == "req":
-        # Submit the request
+        # Submit the request (kept as fallback)
         media_type = parts[1]
         tmdb_id = int(parts[2])
 

@@ -69,7 +69,34 @@ def extract_media_info_from_url(url: str) -> dict | None:
             "source": "tmdb_url"
         }
 
-    # 2. Otherwise, request the page and parse metadata
+    # 2. Check if it's an IMDb URL to bypass WAF challenges
+    imdb_match = re.search(r"imdb\.com/title/(tt\d+)", url)
+    if imdb_match:
+        imdb_id = imdb_match.group(1)
+        logger.info(f"Detected IMDb URL. ID: {imdb_id}")
+        try:
+            suggest_url = f"https://v3.sg.media-imdb.com/suggestion/x/{imdb_id}.json"
+            response = requests.get(suggest_url, headers=HEADERS, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            if data and "d" in data:
+                for item in data["d"]:
+                    if item.get("id") == imdb_id:
+                        title = item.get("l")
+                        year = item.get("y")
+                        qid = item.get("qid", "")
+                        media_type = "tv" if "tv" in qid.lower() else "movie"
+                        logger.info(f"Extracted from IMDb Suggest: Title='{title}', Year={year}, Type={media_type}")
+                        return {
+                            "title": title,
+                            "year": year,
+                            "media_type": media_type,
+                            "source": "imdb_suggest"
+                        }
+        except Exception as e:
+            logger.warning(f"Error querying IMDb suggest API: {e}")
+
+    # 3. Otherwise, request the page and parse metadata
     try:
         response = requests.get(url, headers=HEADERS, timeout=10, allow_redirects=True)
         response.raise_for_status()
@@ -96,12 +123,14 @@ def extract_media_info_from_url(url: str) -> dict | None:
                 if item_type in ["Movie", "TVSeries", "TVEpisode"]:
                     name = item.get("name")
                     if name:
-                        year = None
-                        release_date = item.get("releaseDate") or item.get("dateCreated")
-                        if release_date and len(release_date) >= 4:
-                            year_match = re.search(r"\d{4}", release_date)
-                            if year_match:
-                                year = int(year_match.group(0))
+                        name, parsed_year = parse_year_from_title(name)
+                        year = parsed_year
+                        if not year:
+                            release_date = item.get("releaseDate") or item.get("dateCreated")
+                            if release_date and len(release_date) >= 4:
+                                year_match = re.search(r"\d{4}", release_date)
+                                if year_match:
+                                    year = int(year_match.group(0))
                         
                         media_type = "movie" if item_type == "Movie" else "tv"
                         logger.info(f"Extracted from JSON-LD: Name='{name}', Year={year}, Type={media_type}")
@@ -116,7 +145,7 @@ def extract_media_info_from_url(url: str) -> dict | None:
             continue
 
     # Fallback to OpenGraph / Meta / Title tags
-    og_title_tag = soup.find("meta", property="og:title") or soup.find("meta", name="twitter:title")
+    og_title_tag = soup.find("meta", property="og:title") or soup.find("meta", attrs={"name": "twitter:title"})
     og_type_tag = soup.find("meta", property="og:type")
     
     title = None

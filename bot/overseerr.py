@@ -12,7 +12,7 @@ STATUS_MAP = {
 }
 
 class OverseerrClient:
-    def __init__(self, base_url: str, api_key: str):
+    def __init__(self, base_url: str, api_key: str, ssl_verify: bool = True):
         # Ensure base_url doesn't end with a slash, then append /api/v1
         self.base_url = base_url.rstrip("/")
         if not self.base_url.endswith("/api/v1"):
@@ -23,11 +23,17 @@ class OverseerrClient:
             "Content-Type": "application/json",
             "Accept": "application/json"
         }
+        self.ssl_verify = ssl_verify
 
     def _get(self, path: str, params: dict = None) -> dict | None:
+        import urllib.parse
         url = f"{self.base_url}{path}"
+        if params:
+            # Enforce %20 encoding for spaces instead of + to satisfy strict servers/proxies
+            query_string = urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
+            url = f"{url}?{query_string}"
         try:
-            response = requests.get(url, headers=self.headers, params=params, timeout=10)
+            response = requests.get(url, headers=self.headers, timeout=10, verify=self.ssl_verify)
             response.raise_for_status()
             return response.json()
         except Exception as e:
@@ -37,7 +43,7 @@ class OverseerrClient:
     def _post(self, path: str, json_data: dict) -> dict | None:
         url = f"{self.base_url}{path}"
         try:
-            response = requests.post(url, headers=self.headers, json=json_data, timeout=10)
+            response = requests.post(url, headers=self.headers, json=json_data, timeout=10, verify=self.ssl_verify)
             response.raise_for_status()
             return response.json()
         except Exception as e:
