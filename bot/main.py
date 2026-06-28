@@ -73,8 +73,61 @@ if not OVERSEERR_SSL_VERIFY:
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     logger.info("SSL certificate verification is disabled for Overseerr/Seerr API calls.")
 
+LANGUAGE_MAP = {
+    "en": "English",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "it": "Italian",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "zh": "Chinese",
+    "pt": "Portuguese",
+    "ru": "Russian",
+    "hi": "Hindi",
+    "sv": "Swedish",
+    "nl": "Dutch",
+    "no": "Norwegian",
+    "da": "Danish",
+    "fi": "Finnish",
+    "pl": "Polish",
+    "tr": "Turkish",
+}
+
 # Initialize Overseerr Client
 overseerr = OverseerrClient(OVERSEERR_URL, OVERSEERR_API_KEY, ssl_verify=OVERSEERR_SSL_VERIFY)
+
+import time
+
+def set_ttl_item(user_data: dict, key: str, value: any, ttl_seconds: int = 2700):
+    """Stores an item in user_data with an expiration timestamp (default 45 mins)."""
+    user_data[key] = {
+        "value": value,
+        "expires_at": time.time() + ttl_seconds
+    }
+
+def get_ttl_item(user_data: dict, key: str) -> any:
+    """Retrieves an item from user_data if it has not expired yet."""
+    item = user_data.get(key)
+    if not item:
+        return None
+    
+    if time.time() > item.get("expires_at", 0):
+        # Evict expired item
+        user_data.pop(key, None)
+        return None
+        
+    return item.get("value")
+
+def cleanup_expired_items(user_data: dict):
+    """Removes all expired TTL items from user_data."""
+    now = time.time()
+    expired_keys = [
+        k for k, v in user_data.items()
+        if isinstance(v, dict) and "expires_at" in v and now > v["expires_at"]
+    ]
+    for k in expired_keys:
+        user_data.pop(k, None)
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -288,6 +341,106 @@ async def display_request_details(message, request_id: int, limit: int):
         )
 
 
+async def show_search_item_details(message, media_type: str, tmdb_id: int, context, is_single_result: bool):
+    """Fetches and displays detailed general information for a search result with options."""
+    try:
+        if media_type == "movie":
+            details = overseerr.get_movie_details(tmdb_id)
+        else:
+            details = overseerr.get_tv_details(tmdb_id)
+            
+        if not details:
+            await message.edit_text(
+                "❌ Failed to load media details.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel search", callback_data="cancel")]])
+            )
+            return
+
+        title = details.get("title") if media_type == "movie" else details.get("name")
+        release_date = details.get("releaseDate") if media_type == "movie" else details.get("firstAirDate")
+        year = release_date.split("-")[0] if release_date else "Unknown"
+        overview = details.get("overview", "No overview available.")
+        
+        # 1. Duration / Runtime
+        if media_type == "movie":
+            runtime = details.get("runtime")
+            duration = f"{runtime} minutes" if runtime else "Unknown"
+        else:
+            episode_run_time = details.get("episodeRunTime", [])
+            if isinstance(episode_run_time, list) and episode_run_time:
+                duration = f"{episode_run_time[0]} minutes per episode"
+            else:
+                duration = "Unknown"
+
+        # 2. Director / Creator
+        directors = []
+        if media_type == "movie":
+            credits = details.get("credits", {})
+            crew = credits.get("crew", []) if isinstance(credits, dict) else []
+            directors = [member.get("name") for member in crew if isinstance(member, dict) and member.get("job") == "Director"]
+        else:
+            created_by = details.get("createdBy", [])
+            if isinstance(created_by, list):
+                directors = [creator.get("name") for creator in created_by if isinstance(creator, dict) and creator.get("name")]
+            if not directors:
+                # Fallback to crew
+                credits = details.get("credits", {})
+                crew = credits.get("crew", []) if isinstance(credits, dict) else []
+                directors = [member.get("name") for member in crew if isinstance(member, dict) and member.get("job") in ["Director", "Creator", "Series Director"]]
+
+        director_str = ", ".join(directors) if directors else "Unknown"
+
+        # 3. Original Idiom / Language
+        lang_code = details.get("originalLanguage", "unknown")
+        language = LANGUAGE_MAP.get(lang_code.lower(), lang_code.upper())
+
+        # Media status
+        media_info = details.get("mediaInfo")
+        status_str = overseerr.get_media_status_str(media_info)
+        status_num = media_info.get("status", 1) if media_info else 1
+
+        emoji = "🎬 Movie" if media_type == "movie" else "📺 TV Show"
+
+        text = (
+            f"ℹ️ **{title} ({year})**\n\n"
+            f"• **Type:** {emoji}\n"
+            f"• **Duration:** {duration}\n"
+            f"• **Director/Creator:** {director_str}\n"
+            f"• **Original Language:** {language}\n"
+            f"• **Status:** {status_str}\n\n"
+            f"📖 **Plot:**\n_{overview[:300] + '...' if len(overview) > 300 else overview}_\n"
+        )
+
+        keyboard = []
+        
+        # Option 1: Request movie (or TV show)
+        req_btn_text = "✅ Request Movie" if media_type == "movie" else "✅ Request TV Show"
+        if status_num in [2, 3]:
+            req_btn_text = "♻️ Request Again"
+            
+        keyboard.append([InlineKeyboardButton(req_btn_text, callback_data=f"search_req:{media_type}:{tmdb_id}")])
+
+        # Option 2: Return to the results list
+        if not is_single_result and get_ttl_item(context.user_data, "last_search_results"):
+            keyboard.append([InlineKeyboardButton("◀️ Return to results list", callback_data="search_ret")])
+
+        # Option 3: Cancel search
+        keyboard.append([InlineKeyboardButton("❌ Cancel search", callback_data="cancel")])
+
+        await message.edit_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+
+    except Exception as e:
+        logger.error(f"Error showing search item details: {e}", exc_info=True)
+        await message.edit_text(
+            "❌ An error occurred while retrieving media details.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel search", callback_data="cancel")]])
+        )
+
+
 async def seerr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lists the last N requests from Seerr (default 3)."""
     message = update.effective_message
@@ -353,10 +506,10 @@ async def present_search_results(
         button_text = f"{emoji} {title} ({year})"
         
         # Callback data format: action:media_type:tmdb_id
-        callback_data = f"sel:{media_type}:{tmdb_id}"
+        callback_data = f"search_sel:{media_type}:{tmdb_id}"
         keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
         
-    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
+    keyboard.append([InlineKeyboardButton("❌ Cancel search", callback_data="cancel")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await message_to_edit.edit_text(
@@ -411,6 +564,7 @@ async def show_item_details_from_dict(message, media_type: str, tmdb_id: int, de
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Processes incoming messages. Detects links or performs direct keyword search."""
+    cleanup_expired_items(context.user_data)
     message_text = update.message.text
     if not message_text:
         return
@@ -433,7 +587,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="Markdown"
                 )
                 return
-            await present_search_results(update, context, processing_msg, query, results)
+            
+            # Store search in user_data
+            set_ttl_item(context.user_data, "last_search_query", query)
+            set_ttl_item(context.user_data, "last_search_results", results)
+
+            # If search returns only one result, display general information directly
+            if len(results) == 1:
+                tmdb_id = results[0]["id"]
+                media_type = results[0].get("mediaType", "movie")
+                await show_search_item_details(processing_msg, media_type, tmdb_id, context, is_single_result=True)
+            else:
+                await present_search_results(update, context, processing_msg, query, results)
         except Exception as e:
             logger.error(f"Search failed: {e}", exc_info=True)
             await processing_msg.edit_text("❌ An error occurred while searching.")
@@ -488,15 +653,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        await present_search_results(
-            update=update,
-            context=context,
-            message_to_edit=processing_msg,
-            query=title,
-            results=results,
-            target_year=year,
-            target_type=media_type
-        )
+        # Store search in user_data
+        set_ttl_item(context.user_data, "last_search_query", title)
+        set_ttl_item(context.user_data, "last_search_results", results)
+
+        # If search returns only one result, display general information directly
+        if len(results) == 1:
+            tmdb_id = results[0]["id"]
+            media_type = results[0].get("mediaType", "movie")
+            await show_search_item_details(processing_msg, media_type, tmdb_id, context, is_single_result=True)
+        else:
+            await present_search_results(
+                update=update,
+                context=context,
+                message_to_edit=processing_msg,
+                query=title,
+                results=results,
+                target_year=year,
+                target_type=media_type
+            )
 
     except Exception as e:
         logger.error(f"Error handling URL message: {e}", exc_info=True)
@@ -504,6 +679,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Processes button clicks from inline keyboards."""
+    cleanup_expired_items(context.user_data)
     query = update.callback_query
     await query.answer()
 
@@ -511,6 +687,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     logger.info(f"Callback trigger: {data}")
 
     if data == "cancel":
+        context.user_data.pop("last_search_query", None)
+        context.user_data.pop("last_search_results", None)
         await query.message.delete()
         return
 
@@ -575,6 +753,45 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 "Please verify Overseerr API connection or logs.",
                 parse_mode="Markdown"
             )
+
+    elif action == "search_sel":
+        media_type = parts[1]
+        tmdb_id = int(parts[2])
+        await show_search_item_details(query.message, media_type, tmdb_id, context, is_single_result=False)
+
+    elif action == "search_req":
+        media_type = parts[1]
+        tmdb_id = int(parts[2])
+        
+        # Get title from message first line
+        first_line = query.message.text.split("\n")[0]
+        title = first_line.replace("ℹ️", "").replace("**", "").strip()
+
+        await query.message.edit_text(f"⏳ Submitting request for **{title}**...", parse_mode="Markdown")
+
+        result = overseerr.request_media(media_type, tmdb_id)
+        if result:
+            context.user_data.pop("last_search_query", None)
+            context.user_data.pop("last_search_results", None)
+            await query.message.edit_text(
+                f"🎉 **Request Submitted Successfully!**\n\n"
+                f"**{title}** has been requested in Seerr.",
+                parse_mode="Markdown"
+            )
+        else:
+            await query.message.edit_text(
+                f"❌ **Failed to request {title}.**\n\n"
+                "Please verify Overseerr API connection or logs.",
+                parse_mode="Markdown"
+            )
+
+    elif action == "search_ret":
+        query_text = get_ttl_item(context.user_data, "last_search_query")
+        results = get_ttl_item(context.user_data, "last_search_results")
+        if query_text and results:
+            await present_search_results(update, context, query.message, query_text, results)
+        else:
+            await query.message.edit_text("⚠️ No search history found (or it has expired). Please search again by typing the title.")
 
     elif action == "req_list":
         limit = int(parts[1])
