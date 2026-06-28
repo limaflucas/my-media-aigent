@@ -59,7 +59,7 @@ def get_secret(key: str, default: str = None) -> str | None:
 
 # Read configuration using the secret helper
 TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN")
-OVERSEERR_URL = os.getenv("OVERSEERR_URL", "http://localhost:5055")
+OVERSEERR_URL = os.getenv("OVERSEERR_URL", "http://seerr:5055")
 OVERSEERR_API_KEY = get_secret("OVERSEERR_API_KEY")
 OVERSEERR_SSL_VERIFY = os.getenv("OVERSEERR_SSL_VERIFY", "true").lower() in ("true", "1", "yes")
 
@@ -89,9 +89,227 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• MyAnimeList (e.g., `myanimelist.net/anime/...`)\n"
         "• AniList (e.g., `anilist.co/anime/...`)\n"
         "• Netflix (e.g., `netflix.com/title/...`)\n\n"
-        "Alternatively, you can just type the **title** of the movie/show, and I will search for it directly!"
+        "Alternatively, you can just type the **title** of the movie/show, and I will search for it directly!\n\n"
+        "ℹ️ **Requests Management:**\n"
+        "Use `/seerr [number]` to view and manage recent requests (default is last 3 requests)."
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
+
+
+async def display_requests_list(message, limit: int, skip: int = 0):
+    """Fetches and displays the list of recent requests."""
+    try:
+        data = overseerr.get_requests(take=limit, skip=skip)
+        if data is None:
+            await message.edit_text("❌ **Failed to connect to Seerr.** Please check connection details or logs.", parse_mode="Markdown")
+            return
+
+        if "results" not in data or not data["results"]:
+            await message.edit_text("📭 **No requests found on Seerr.**", parse_mode="Markdown")
+            return
+
+        results = data["results"]
+        
+        # Build the message text and buttons
+        text_lines = [f"📋 **Last {len(results)} Requests on Seerr:**\n"]
+        keyboard = []
+        
+        for req in results:
+            req_id = req.get("id")
+            req_status = req.get("status")
+            media_info = req.get("media", {})
+            tmdb_id = media_info.get("tmdbId")
+            media_type = media_info.get("mediaType", "movie")
+            
+            # Map request status to human-readable
+            # MediaRequestStatus: 1 = PENDING, 2 = APPROVED, 3 = DECLINED, 4 = FAILED, 5 = COMPLETED
+            status_map = {
+                1: "⏳ Pending Approval",
+                2: "✅ Approved",
+                3: "❌ Declined",
+                4: "⚠️ Failed",
+                5: "🎉 Completed"
+            }
+            status_str = status_map.get(req_status, f"Unknown ({req_status})")
+            
+            # Fetch details to get the media title/year
+            title = None
+            year = None
+            try:
+                if media_type == "movie":
+                    details = overseerr.get_movie_details(tmdb_id)
+                else:
+                    details = overseerr.get_tv_details(tmdb_id)
+                
+                if details:
+                    title = details.get("title") if media_type == "movie" else details.get("name")
+                    release_date = details.get("releaseDate") if media_type == "movie" else details.get("firstAirDate")
+                    year = release_date.split("-")[0] if release_date else None
+            except Exception as e:
+                logger.error(f"Failed to fetch details for tmdbId {tmdb_id}: {e}")
+                
+            if not title:
+                title = f"TMDB {tmdb_id}"
+            
+            media_emoji = "🎬" if media_type == "movie" else "📺"
+            display_title = f"{media_emoji} {title}"
+            if year:
+                display_title += f" ({year})"
+                
+            text_lines.append(f"**#{req_id}** — {display_title}\n• Status: {status_str}\n")
+            
+            # Button to select this request
+            # Callback data format: req_sel:{request_id}:{limit}
+            keyboard.append([
+                InlineKeyboardButton(f"🔎 Manage #{req_id}: {title[:20]}...", callback_data=f"req_sel:{req_id}:{limit}")
+            ])
+            
+        keyboard.append([InlineKeyboardButton("❌ Close", callback_data="cancel")])
+        
+        await message.edit_text(
+            "\n".join(text_lines),
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Error displaying requests list: {e}", exc_info=True)
+        await message.edit_text("❌ An error occurred while fetching the requests list.")
+
+
+async def display_request_details(message, request_id: int, limit: int):
+    """Fetches and displays the details for a single request with action buttons."""
+    try:
+        req = overseerr.get_request(request_id)
+        if not req:
+            await message.edit_text(
+                f"❌ Request **#{request_id}** was not found or could not be loaded.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back to List", callback_data=f"req_list:{limit}")]])
+            )
+            return
+            
+        req_status = req.get("status")
+        media_info = req.get("media", {})
+        tmdb_id = media_info.get("tmdbId")
+        media_type = media_info.get("mediaType", "movie")
+        
+        status_map = {
+            1: "⏳ Pending Approval",
+            2: "✅ Approved",
+            3: "❌ Declined",
+            4: "⚠️ Failed",
+            5: "🎉 Completed"
+        }
+        status_str = status_map.get(req_status, f"Unknown ({req_status})")
+        
+        # Fetch details to get the media title/year
+        title = None
+        year = None
+        overview = None
+        try:
+            if media_type == "movie":
+                details = overseerr.get_movie_details(tmdb_id)
+            else:
+                details = overseerr.get_tv_details(tmdb_id)
+            
+            if details:
+                title = details.get("title") if media_type == "movie" else details.get("name")
+                release_date = details.get("releaseDate") if media_type == "movie" else details.get("firstAirDate")
+                year = release_date.split("-")[0] if release_date else None
+                overview = details.get("overview")
+        except Exception as e:
+            logger.error(f"Failed to fetch details for tmdbId {tmdb_id}: {e}")
+            
+        if not title:
+            title = f"TMDB {tmdb_id}"
+            
+        media_emoji = "🎬" if media_type == "movie" else "📺"
+        display_title = f"{media_emoji} {title}"
+        if year:
+            display_title += f" ({year})"
+            
+        requested_by = req.get("requestedBy", {})
+        username = requested_by.get("username", "Unknown")
+        created_at = req.get("createdAt", "N/A")
+        # Format createdAt if it is a ISO string
+        if created_at != "N/A":
+            try:
+                created_at = created_at.replace("T", " ")[:16]
+            except Exception:
+                pass
+
+        text = (
+            f"📋 **Manage Request #{request_id}**\n\n"
+            f"**Media:** {display_title}\n"
+            f"**Type:** {media_type.capitalize()}\n"
+            f"**Status:** {status_str}\n"
+            f"**Requested By:** {username}\n"
+            f"**Date:** {created_at}\n\n"
+        )
+        
+        if overview:
+            if len(overview) > 200:
+                overview = overview[:200] + "..."
+            text += f"_{overview}_\n"
+
+        keyboard = []
+        
+        # Action buttons based on status:
+        # MediaRequestStatus: 1 = PENDING, 2 = APPROVED, 3 = DECLINED, 4 = FAILED, 5 = COMPLETED
+        # - Approve: only if PENDING (1)
+        # - Deny (Decline): if PENDING (1) or APPROVED (2)
+        # - Retry: only if FAILED (4)
+        # - Delete: always
+        
+        action_row = []
+        if req_status == 1:
+            action_row.append(InlineKeyboardButton("✅ Approve", callback_data=f"req_act:approve:{request_id}:{limit}"))
+            action_row.append(InlineKeyboardButton("❌ Deny", callback_data=f"req_act:decline:{request_id}:{limit}"))
+        elif req_status == 2:
+            action_row.append(InlineKeyboardButton("❌ Deny", callback_data=f"req_act:decline:{request_id}:{limit}"))
+        elif req_status == 4:
+            action_row.append(InlineKeyboardButton("♻️ Retry", callback_data=f"req_act:retry:{request_id}:{limit}"))
+            
+        if action_row:
+            keyboard.append(action_row)
+            
+        keyboard.append([InlineKeyboardButton("🗑️ Delete Request", callback_data=f"req_act:delete:{request_id}:{limit}")])
+        keyboard.append([InlineKeyboardButton("◀️ Back to List", callback_data=f"req_list:{limit}")])
+        
+        await message.edit_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Error displaying request details: {e}", exc_info=True)
+        await message.edit_text(
+            "❌ An error occurred while loading request details.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back to List", callback_data=f"req_list:{limit}")]])
+        )
+
+
+async def seerr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lists the last N requests from Seerr (default 3)."""
+    message = update.effective_message
+    if not message:
+        return
+
+    args = context.args
+    limit = 3
+    if args:
+        try:
+            val = int(args[0])
+            if 1 <= val <= 20:
+                limit = val
+            else:
+                await message.reply_text("⚠️ Please specify a number between 1 and 20.")
+                return
+        except ValueError:
+            await message.reply_text("⚠️ Invalid number format. Use `/seerr [number]` (e.g. `/seerr 5`).")
+            return
+
+    processing_msg = await message.reply_text("⏳ **Fetching requests from Seerr...**", parse_mode="Markdown")
+    await display_requests_list(processing_msg, limit, 0)
 
 async def present_search_results(
     update: Update,
@@ -358,6 +576,104 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 parse_mode="Markdown"
             )
 
+    elif action == "req_list":
+        limit = int(parts[1])
+        await display_requests_list(query.message, limit)
+
+    elif action == "req_sel":
+        request_id = int(parts[1])
+        limit = int(parts[2])
+        await display_request_details(query.message, request_id, limit)
+
+    elif action == "req_act":
+        act = parts[1]
+        request_id = int(parts[2])
+        limit = int(parts[3])
+
+        keyboard = [[InlineKeyboardButton("◀️ Back to List", callback_data=f"req_list:{limit}")]]
+
+        if act == "approve":
+            await query.message.edit_text(f"⏳ Approving request #{request_id}...")
+            res = overseerr.approve_request(request_id)
+            if res:
+                keyboard.append([InlineKeyboardButton("🔎 View Details", callback_data=f"req_sel:{request_id}:{limit}")])
+                await query.message.edit_text(
+                    f"✅ Request #{request_id} has been approved.",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="Markdown"
+                )
+            else:
+                keyboard.append([InlineKeyboardButton("🔎 View Details", callback_data=f"req_sel:{request_id}:{limit}")])
+                await query.message.edit_text(
+                    f"❌ Failed to approve request #{request_id}.",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="Markdown"
+                )
+
+        elif act == "decline":
+            await query.message.edit_text(f"⏳ Declining request #{request_id}...")
+            res = overseerr.decline_request(request_id)
+            if res:
+                keyboard.append([InlineKeyboardButton("🔎 View Details", callback_data=f"req_sel:{request_id}:{limit}")])
+                await query.message.edit_text(
+                    f"✅ Request #{request_id} has been declined.",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="Markdown"
+                )
+            else:
+                keyboard.append([InlineKeyboardButton("🔎 View Details", callback_data=f"req_sel:{request_id}:{limit}")])
+                await query.message.edit_text(
+                    f"❌ Failed to decline request #{request_id}.",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="Markdown"
+                )
+
+        elif act == "retry":
+            await query.message.edit_text(f"⏳ Retrying request #{request_id}...")
+            res = overseerr.retry_request(request_id)
+            if res:
+                keyboard.append([InlineKeyboardButton("🔎 View Details", callback_data=f"req_sel:{request_id}:{limit}")])
+                await query.message.edit_text(
+                    f"✅ Request #{request_id} is being retried.",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="Markdown"
+                )
+            else:
+                keyboard.append([InlineKeyboardButton("🔎 View Details", callback_data=f"req_sel:{request_id}:{limit}")])
+                await query.message.edit_text(
+                    f"❌ Failed to retry request #{request_id}.",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="Markdown"
+                )
+
+        elif act == "delete":
+            await query.message.edit_text(f"⏳ Deleting request #{request_id}...")
+            res = overseerr.delete_request(request_id)
+            if res:
+                await query.message.edit_text(
+                    f"✅ Request #{request_id} has been deleted.",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="Markdown"
+                )
+            else:
+                keyboard.append([InlineKeyboardButton("🔎 View Details", callback_data=f"req_sel:{request_id}:{limit}")])
+                await query.message.edit_text(
+                    f"❌ Failed to delete request #{request_id}.",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="Markdown"
+                )
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log the error and send a telegram message to notify the user/developer."""
+    logger.error("Exception while handling an update:", exc_info=context.error)
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "❌ An unexpected error occurred. Please try again later."
+            )
+        except Exception:
+            pass
+
 def main():
     if not TELEGRAM_BOT_TOKEN or not OVERSEERR_API_KEY:
         print("CRITICAL: TELEGRAM_BOT_TOKEN and OVERSEERR_API_KEY must be set in environmental variables.")
@@ -370,8 +686,12 @@ def main():
 
     # Handlers
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("seerr", seerr_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(handle_callback_query))
+
+    # Error Handler
+    application.add_error_handler(error_handler)
 
     # Run bot
     application.run_polling()

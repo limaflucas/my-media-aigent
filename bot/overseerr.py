@@ -55,6 +55,16 @@ class OverseerrClient:
                 pass
             return None
 
+    def _delete(self, path: str) -> bool:
+        url = f"{self.base_url}{path}"
+        try:
+            response = requests.delete(url, headers=self.headers, timeout=10, verify=self.ssl_verify)
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            logger.error(f"Overseerr DELETE request to {path} failed: {e}")
+            return False
+
     def search(self, query: str) -> list:
         """Searches Overseerr for movies/TV shows."""
         data = self._get("/search", params={"query": query})
@@ -109,3 +119,30 @@ class OverseerrClient:
 
         logger.info(f"Submitting request: {payload}")
         return self._post("/request", payload)
+
+    def get_requests(self, take: int = 10, skip: int = 0, filter_status: str = None) -> dict | None:
+        """Gets media requests from Overseerr/Seerr."""
+        params = {"take": take, "skip": skip}
+        if filter_status:
+            params["filter"] = filter_status
+        return self._get("/request", params=params)
+
+    def get_request(self, request_id: int) -> dict | None:
+        """Gets details of a specific request."""
+        return self._get(f"/request/{request_id}")
+
+    def approve_request(self, request_id: int) -> dict | None:
+        """Approves a media request."""
+        return self._post(f"/request/{request_id}/approve", {})
+
+    def decline_request(self, request_id: int) -> dict | None:
+        """Declines a media request."""
+        return self._post(f"/request/{request_id}/decline", {})
+
+    def retry_request(self, request_id: int) -> dict | None:
+        """Retries a failed media request."""
+        return self._post(f"/request/{request_id}/retry", {})
+
+    def delete_request(self, request_id: int) -> bool:
+        """Deletes a media request."""
+        return self._delete(f"/request/{request_id}")

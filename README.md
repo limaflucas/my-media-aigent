@@ -85,6 +85,7 @@ If this is a fresh setup:
 3. The bot will automatically scrape the link, fetch corresponding items from Seerr, and display the options.
 4. Select the matching option and click **Request Movie** (or **Request TV Show**) to submit the request!
 5. Alternatively, you can search for movies or shows directly by typing their name (e.g., `The Shawshank Redemption`).
+6. Manage requests directly using the `/seerr [number]` command. You can list the last `number` requests (defaults to 3), view details, approve, deny, retry (if failed), or delete them.
 
 ---
 
