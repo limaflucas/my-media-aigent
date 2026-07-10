@@ -15,6 +15,13 @@ services:
     secrets:
       - telegram_bot_token
       - overseerr_api_key
+    networks:
+      - mouseion_private
+
+networks:
+  mouseion_private:
+    external: true
+    name: mouseion_private
 
 secrets:
   telegram_bot_token:
