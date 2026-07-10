@@ -1,33 +1,23 @@
 services:
-  overseerr:
-    image: sct/overseerr:latest
-    container_name: overseerr-app
-    restart: unless-stopped
-    ports:
-      - "5055:5055"
-    volumes:
-      - ./config/overseerr:/app/config
+  my-media-aigent:
+    image: registry.homelab/homelab/my-media-aigent:latest
     environment:
-      - TZ=UTC
-      - PORT=5055
-
-  bot:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: movie-request-bot
-    restart: unless-stopped
-    depends_on:
-      - overseerr
-    environment:
-      - OVERSEERR_URL=http://overseerr:5055
-      - OVERSEERR_SSL_VERIFY=true
+      - TZ=America/Halifax
+      - OVERSEERR_URL=http://seerr:5055
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
     secrets:
       - telegram_bot_token
       - overseerr_api_key
 
 secrets:
   telegram_bot_token:
-    file: ./telegram_bot_token.txt
+    external: true
   overseerr_api_key:
-    file: ./overseerr_api_key.txt
+    external: true
