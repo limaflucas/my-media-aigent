@@ -2,4 +2,4 @@ python-telegram-bot==22.8
 requests==2.32.3
 beautifulsoup4==4.12.3
 truststore==0.10.4
-rapidfuzz==3.10.1
+rapidfuzz>=3.11.0
