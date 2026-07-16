@@ -75,17 +75,52 @@ If this is a fresh setup:
 
 ## How to Use the Telegram Bot
 
-1. Open your Telegram bot and click **Start** or send `/start`.
-2. Paste any movie or TV show link from a supported website:
+1. **Start the Bot**: Open your Telegram bot and click **Start** or send `/start`.
+2. **Request via Links**: Paste any movie or TV show link from a supported website:
    - **IMDb:** `https://www.imdb.com/title/tt0111161/`
    - **Letterboxd:** `https://letterboxd.com/film/the-batman/`
    - **TMDB:** `https://www.themoviedb.org/movie/278-the-shawshank-redemption`
    - **MyAnimeList:** `https://myanimelist.net/anime/5114/Fullmetal_Alchemist__Brotherhood`
    - **Netflix:** `https://www.netflix.com/title/80057281`
-3. The bot will automatically scrape the link, fetch corresponding items from Seerr, and display the options.
-4. Select the matching option and click **Request Movie** (or **Request TV Show**) to submit the request!
-5. Alternatively, you can search for movies or shows directly by typing their name (e.g., `The Shawshank Redemption`).
-6. Manage requests directly using the `/seerr [number]` command. You can list the last `number` requests (defaults to 3), view details, approve, deny, retry (if failed), or delete them.
+3. **Request via Search**: Alternatively, search for media directly by typing its title (e.g., `The Shawshank Redemption`).
+4. **Confirm Request**: The bot directly routes your selection to a rich **Confirm Request** card showing:
+   - **Tagline** and **Plot Overview**.
+   - **Ratings**: Live ratings aggregated from TMDb, Rotten Tomatoes (both critics & audience), and IMDb.
+   - **Metadata**: Genres, regional classification (BR/US), runtime/duration, and directors/creators.
+   - **Where to Watch**: A list of available streaming platforms with beautiful, custom-branded icons (e.g. 🔴 Netflix, 🟣 Max, 🔵 Prime Video).
+5. **Manage Requests (`/seerr` command)**:
+   - `/seerr ?`: List all available request management commands.
+   - `/seerr list`: List the last 5 media requests from Seerr.
+   - `/seerr [number]`: List the last custom number of requests (between 1 and 20).
+   - *Note:* From the lists, admins can view details, approve, decline, retry failed requests (with built-in exponential backoff), or delete them.
+
+---
+
+## Development & Dev Tools
+
+For local development and testing, you can run the bot outside of Docker with auto-reload enabled:
+
+### 1. Install Dependencies
+Make sure you have your virtual environment active and dependencies installed:
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 2. Export Configuration Variables
+Set up your local credentials matching your target environment:
+```bash
+export OVERSEERR_URL="https://catalog.homelab"
+export OVERSEERR_API_KEY="your_api_key_here"
+export TELEGRAM_BOT_TOKEN="your_bot_token_here"
+```
+
+### 3. Start the Hot-Reloading Watcher
+Run the custom watcher utility to automatically detect changes in the `bot/` directory and restart the service on the fly:
+```bash
+python dev_tools/watch.py
+```
 
 ---
 
@@ -99,6 +134,8 @@ my-movie-agent/
 ├── telegram_bot_token.txt   # File containing the Telegram Bot Token (Docker Secret)
 ├── overseerr_api_key.txt    # File containing the Seerr/Overseerr API Key (Docker Secret)
 ├── README.md                # System documentation
+├── dev_tools/
+│   └── watch.py             # Local development hot-reload watcher script
 └── bot/
     ├── __init__.py          # Bot package initializer
     ├── main.py              # Main bot execution and telegram handlers

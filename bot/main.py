@@ -11,7 +11,7 @@ except ImportError:
     pass
 
 import requests
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -147,6 +147,140 @@ def build_poster_url(details: dict) -> str | None:
     return None
 
 
+PROVIDER_EMOJIS = {
+    "netflix": "🔴 Netflix",
+    "netflix basic with ads": "🔴 Netflix",
+    "amazon prime video": "🔵 Prime Video",
+    "prime video": "🔵 Prime Video",
+    "disney plus": "💎 Disney+",
+    "disney+": "💎 Disney+",
+    "hbo max": "🟣 Max",
+    "max": "🟣 Max",
+    "apple tv": "🍏 Apple TV",
+    "apple tv plus": "🍏 Apple TV+",
+    "apple tv+": "🍏 Apple TV+",
+    "paramount plus": "🔷 Paramount+",
+    "paramount+": "🔷 Paramount+",
+    "paramount plus apple tv channel": "🔷 Paramount+",
+    "crunchyroll": "🟠 Crunchyroll",
+    "hulu": "🟢 Hulu",
+    "peacock": "🦚 Peacock",
+    "peacock premium": "🦚 Peacock",
+    "star+": "⭐ Star+",
+    "globoplay": "🔴 Globoplay",
+    "youtube": "🔺 YouTube",
+}
+
+
+def get_streaming_providers(details: dict) -> list[str]:
+    """Extracts watch providers from the details data dictionary for BR/US or fallback regions."""
+    providers = []
+    watch_providers = details.get("watchProviders", [])
+    if not watch_providers:
+        return providers
+
+    # Prioritize regions: Brazil ('BR'), US ('US'), then any first region
+    target_region = None
+    for region_code in ["BR", "US"]:
+        for wp in watch_providers:
+            if wp.get("iso_3166_1") == region_code:
+                if wp.get("flatrate"):
+                    target_region = wp
+                    break
+        if target_region:
+            break
+
+    if not target_region:
+        for wp in watch_providers:
+            if wp.get("flatrate"):
+                target_region = wp
+                break
+
+    if target_region and "flatrate" in target_region:
+        for item in target_region["flatrate"]:
+            name = item.get("name")
+            if name and name not in providers:
+                providers.append(name)
+
+    return providers
+
+
+def format_providers(providers: list[str]) -> str:
+    """Formats watch provider names mapping them to emojis where applicable."""
+    formatted = []
+    for p in providers:
+        p_lower = p.lower().strip()
+        emoji_name = None
+        for key, val in PROVIDER_EMOJIS.items():
+            if key in p_lower:
+                emoji_name = val
+                break
+        if emoji_name:
+            if emoji_name not in formatted:
+                formatted.append(emoji_name)
+        else:
+            formatted.append(f"📺 {p}")
+    return ", ".join(formatted)
+
+
+def get_movie_certification(details: dict) -> str | None:
+    """Extracts the movie rating certification, prioritizing BR then US regions."""
+    results = details.get("releases", {}).get("results", [])
+    for region in ["BR", "US"]:
+        for res in results:
+            if res.get("iso_3166_1") == region:
+                for rd in res.get("release_dates", []):
+                    cert = rd.get("certification")
+                    if cert:
+                        return cert
+    for res in results:
+        for rd in res.get("release_dates", []):
+            cert = rd.get("certification")
+            if cert:
+                return cert
+    return None
+
+
+def get_tv_certification(details: dict) -> str | None:
+    """Extracts the TV show content rating certification, prioritizing BR then US regions."""
+    results = details.get("contentRatings", {}).get("results", [])
+    for region in ["BR", "US"]:
+        for res in results:
+            if res.get("iso_3166_1") == region:
+                rating = res.get("rating")
+                if rating:
+                    return rating
+    for res in results:
+        rating = res.get("rating")
+        if rating:
+            return rating
+    return None
+
+
+def get_media_ratings(media_type: str, tmdb_id: int) -> dict:
+    """Fetches Rotten Tomatoes and IMDb ratings from Overseerr."""
+    ratings = {"tmdb": None, "rt_critics": None, "rt_audience": None, "imdb": None}
+    try:
+        if media_type == "movie":
+            data = overseerr._get(f"/movie/{tmdb_id}/ratingscombined")
+            if data:
+                rt = data.get("rt", {})
+                if rt:
+                    ratings["rt_critics"] = rt.get("criticsScore")
+                    ratings["rt_audience"] = rt.get("audienceScore")
+                imdb = data.get("imdb", {})
+                if imdb:
+                    ratings["imdb"] = imdb.get("criticsScore")
+        else:
+            data = overseerr._get(f"/tv/{tmdb_id}/ratings")
+            if data:
+                ratings["rt_critics"] = data.get("criticsScore")
+                ratings["rt_audience"] = data.get("audienceScore")
+    except Exception as e:
+        logger.warning(f"Failed to fetch ratings for {media_type} {tmdb_id}: {e}")
+    return ratings
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sends a welcoming message explaining the bot's features."""
     welcome_text = (
@@ -165,7 +299,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Any web page with movie/TV metadata\n\n"
         "Alternatively, you can just type the **title** of the movie/show, and I will search for it directly!\n\n"
         "ℹ️ **Requests Management:**\n"
-        "Use `/seerr [number]` to view and manage recent requests (default is last 3 requests)."
+        "Use `/seerr list` to view and manage the last 5 requests, `/seerr [number]` for a custom amount, or `/seerr ?` for help."
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
@@ -355,120 +489,49 @@ async def display_request_details(message, request_id: int, limit: int):
         )
 
 
-async def show_search_item_details(message, media_type: str, tmdb_id: int, context, is_single_result: bool):
-    """Fetches and displays detailed general information for a search result with options."""
-    try:
-        if media_type == "movie":
-            details = overseerr.get_movie_details(tmdb_id)
-        else:
-            details = overseerr.get_tv_details(tmdb_id)
 
-        if not details:
-            await message.edit_text(
-                "❌ Failed to load media details.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel search", callback_data="cancel")]])
-            )
-            return
-
-        title = details.get("title") if media_type == "movie" else details.get("name")
-        release_date = details.get("releaseDate") if media_type == "movie" else details.get("firstAirDate")
-        year = release_date.split("-")[0] if release_date else "Unknown"
-        overview = details.get("overview", "No overview available.")
-
-        # 1. Duration / Runtime
-        if media_type == "movie":
-            runtime = details.get("runtime")
-            duration = f"{runtime} minutes" if runtime else "Unknown"
-        else:
-            episode_run_time = details.get("episodeRunTime", [])
-            if isinstance(episode_run_time, list) and episode_run_time:
-                duration = f"{episode_run_time[0]} minutes per episode"
-            else:
-                duration = "Unknown"
-
-        # 2. Director / Creator
-        directors = []
-        if media_type == "movie":
-            credits = details.get("credits", {})
-            crew = credits.get("crew", []) if isinstance(credits, dict) else []
-            directors = [member.get("name") for member in crew if isinstance(member, dict) and member.get("job") == "Director"]
-        else:
-            created_by = details.get("createdBy", [])
-            if isinstance(created_by, list):
-                directors = [creator.get("name") for creator in created_by if isinstance(creator, dict) and creator.get("name")]
-            if not directors:
-                # Fallback to crew
-                credits = details.get("credits", {})
-                crew = credits.get("crew", []) if isinstance(credits, dict) else []
-                directors = [member.get("name") for member in crew if isinstance(member, dict) and member.get("job") in ["Director", "Creator", "Series Director"]]
-
-        director_str = ", ".join(directors) if directors else "Unknown"
-
-        # 3. Original Idiom / Language
-        lang_code = details.get("originalLanguage", "unknown")
-        language = LANGUAGE_MAP.get(lang_code.lower(), lang_code.upper())
-
-        # Media status
-        media_info = details.get("mediaInfo")
-        status_str = overseerr.get_media_status_str(media_info)
-        status_num = media_info.get("status", 1) if media_info else 1
-        emoji = "🎬 Movie" if media_type == "movie" else "📺 TV Show"
-
-        text = (
-            f"ℹ️ **{title} ({year})**\n\n"
-            f"• **Type:** {emoji}\n"
-            f"• **Duration:** {duration}\n"
-            f"• **Director/Creator:** {director_str}\n"
-            f"• **Original Language:** {language}\n"
-            f"• **Status:** {status_str}\n\n"
-            f"📖 **Plot:**\n_{overview[:300] + '...' if len(overview) > 300 else overview}_\n"
-        )
-
-        keyboard = []
-        # Option 1: Request movie (or TV show) - now goes to confirmation card
-        req_btn_text = "✅ Request Movie" if media_type == "movie" else "✅ Request TV Show"
-        if status_num in [2, 3]:
-            req_btn_text = "♻️ Request Again"
-        keyboard.append([InlineKeyboardButton(req_btn_text, callback_data=f"confirm_req:{media_type}:{tmdb_id}")])
-
-        # Option 2: Return to the results list
-        if not is_single_result and get_ttl_item(context.user_data, "last_search_results"):
-            keyboard.append([InlineKeyboardButton("◀️ Return to results list", callback_data="search_ret")])
-
-        # Option 3: Cancel search
-        keyboard.append([InlineKeyboardButton("❌ Cancel search", callback_data="cancel")])
-
-        await message.edit_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        logger.error(f"Error showing search item details: {e}", exc_info=True)
-        await message.edit_text(
-            "❌ An error occurred while retrieving media details.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel search", callback_data="cancel")]])
-        )
 
 
 async def seerr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lists the last N requests from Seerr (default 3)."""
+    """Lists recent requests from Seerr or shows help, requiring a parameter."""
     message = update.effective_message
     if not message:
         return
 
     args = context.args
-    limit = 3
-    if args:
+    if not args:
+        await message.reply_text(
+            "⚠️ The `/seerr` command requires a parameter.\n"
+            "Use `/seerr list` to show the last 5 requests, `/seerr [number]` to show a custom amount, or `/seerr ?` for help.",
+            parse_mode="Markdown"
+        )
+        return
+
+    param = args[0].strip().lower()
+
+    if param == "?":
+        help_text = (
+            "📖 **Available Commands:**\n\n"
+            "• `/start` — Start the bot, display welcome message, and list supported links.\n"
+            "• `/seerr list` — View and manage the last 5 requests from Seerr.\n"
+            "• `/seerr [number]` — View and manage the last `[number]` requests from Seerr (max 20).\n"
+            "• `/seerr ?` — Show this help message."
+        )
+        await message.reply_text(help_text, parse_mode="Markdown")
+        return
+
+    if param == "list":
+        limit = 5
+    else:
         try:
-            val = int(args[0])
+            val = int(param)
             if 1 <= val <= 20:
                 limit = val
             else:
                 await message.reply_text("⚠️ Please specify a number between 1 and 20.")
                 return
         except ValueError:
-            await message.reply_text("⚠️ Invalid number format. Use `/seerr [number]` (e.g. `/seerr 5`).")
+            await message.reply_text("⚠️ Invalid parameter. Use `/seerr list`, `/seerr [number]`, or `/seerr ?` for help.")
             return
 
     processing_msg = await message.reply_text("⏳ **Fetching requests from Seerr...**", parse_mode="Markdown")
@@ -570,6 +633,7 @@ async def show_confirmation_card(
         title = details.get("title") if media_type == "movie" else details.get("name")
         release_date = details.get("releaseDate") if media_type == "movie" else details.get("firstAirDate")
         year = release_date.split("-")[0] if release_date else "Unknown"
+        tagline = details.get("tagline")
         overview = details.get("overview", "No overview available.")
         overview = overview[:300] + "…" if len(overview) > 300 else overview
 
@@ -577,15 +641,100 @@ async def show_confirmation_card(
         status_str = overseerr.get_media_status_str(media_info)
         status_num = media_info.get("status", 1) if media_info else 1
 
-        # Build caption
-        caption = (
-            f"🧾 **Confirm Request**\n\n"
-            f"**{title} ({year})**\n"
-            f"• Type: {'🎬 Movie' if media_type == 'movie' else '📺 TV Show'}\n"
-            f"• Seerr Status: {status_str}\n\n"
-            f"📖 **Plot:**\n_{overview}_\n\n"
-            f"Confirm adding this to your library?"
-        )
+        # 1. Duration / Runtime
+        if media_type == "movie":
+            runtime = details.get("runtime")
+            duration = f"{runtime}m" if runtime else "Unknown"
+        else:
+            episode_run_time = details.get("episodeRunTime", [])
+            if isinstance(episode_run_time, list) and episode_run_time:
+                duration = f"{episode_run_time[0]}m per episode"
+            else:
+                duration = "Unknown"
+
+        # 2. Director / Creator
+        directors = []
+        if media_type == "movie":
+            credits = details.get("credits", {})
+            crew = credits.get("crew", []) if isinstance(credits, dict) else []
+            directors = [member.get("name") for member in crew if isinstance(member, dict) and member.get("job") == "Director"]
+        else:
+            created_by = details.get("createdBy", [])
+            if isinstance(created_by, list):
+                directors = [creator.get("name") for creator in created_by if isinstance(creator, dict) and creator.get("name")]
+            if not directors:
+                # Fallback to crew
+                credits = details.get("credits", {})
+                crew = credits.get("crew", []) if isinstance(credits, dict) else []
+                directors = [member.get("name") for member in crew if isinstance(member, dict) and member.get("job") in ["Director", "Creator", "Series Director"]]
+
+        director_str = ", ".join(directors) if directors else "Unknown"
+
+        # 3. Original Idiom / Language
+        lang_code = details.get("originalLanguage", "unknown")
+        language = LANGUAGE_MAP.get(lang_code.lower(), lang_code.upper())
+
+        # 4. Genres
+        genres = [g.get("name") for g in details.get("genres", []) if g.get("name")]
+        genres_str = ", ".join(genres) if genres else "Unknown"
+
+        # 5. Certification / Classification
+        cert = get_movie_certification(details) if media_type == "movie" else get_tv_certification(details)
+        cert_str = cert if cert else "Not Rated"
+
+        # 6. Ratings
+        ratings = get_media_ratings(media_type, tmdb_id)
+        vote_average = details.get("voteAverage")
+        if vote_average:
+            ratings["tmdb"] = vote_average
+
+        ratings_parts = []
+        if ratings["tmdb"] is not None:
+            ratings_parts.append(f"⭐️ **TMDb**: {ratings['tmdb']:.1f}/10")
+        if ratings["rt_critics"] is not None:
+            aud = f" (🍿 {ratings['rt_audience']}%" if ratings['rt_audience'] is not None else ""
+            ratings_parts.append(f"🍅 **RT**: {ratings['rt_critics']}%{aud}{')' if aud else ''}")
+        if ratings["imdb"] is not None:
+            ratings_parts.append(f"🎬 **IMDb**: {ratings['imdb']:.1f}/10")
+
+        ratings_line = "  |  ".join(ratings_parts) if ratings_parts else None
+
+        # Build caption with reordered & reorganized layout
+        caption_lines = []
+        
+        # Title & Year with Type Icon
+        icon = "🎬" if media_type == "movie" else "📺"
+        caption_lines.append(f"{icon} **{title} ({year})**")
+        
+        # Tagline
+        if tagline:
+            caption_lines.append(f"_“{tagline}”_\n")
+        else:
+            caption_lines.append("")
+
+        # Ratings
+        if ratings_line:
+            caption_lines.append(f"{ratings_line}\n")
+
+        # Metadata Bullet Points
+        caption_lines.append(f"• 🏷️ **Genres**: {genres_str}")
+        caption_lines.append(f"• 🔞 **Classification**: {cert_str}")
+        caption_lines.append(f"• ⏱️ **Duration**: {duration}")
+        caption_lines.append(f"• 📣 **Director/Creator**: {director_str}")
+        caption_lines.append(f"• 🗣️ **Original Language**: {language}")
+        caption_lines.append(f"• 📡 **Status**: {status_str}")
+
+        # Watch Providers
+        providers = get_streaming_providers(details)
+        if providers:
+            providers_str = format_providers(providers)
+            caption_lines.append(f"• 🖥️ **Where to Watch**: {providers_str}")
+
+        # Plot & CTA
+        caption_lines.append(f"\n📖 **Plot**:\n_{overview}_\n")
+        caption_lines.append("Confirm adding this to your library?")
+        
+        caption = "\n".join(caption_lines)
 
         # Build keyboard
         keyboard = [
@@ -594,6 +743,10 @@ async def show_confirmation_card(
                 InlineKeyboardButton("❌ Cancel", callback_data="cancel"),
             ]
         ]
+        if get_ttl_item(context.user_data, "last_search_results"):
+            keyboard.append([
+                InlineKeyboardButton("◀️ Return to results list", callback_data="search_ret")
+            ])
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         # Try to send with poster
@@ -663,7 +816,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(results) == 1:
                 tmdb_id = results[0]["id"]
                 media_type = results[0].get("mediaType", "movie")
-                await show_search_item_details(processing_msg, media_type, tmdb_id, context, is_single_result=True)
+                await processing_msg.delete()
+                await show_confirmation_card(
+                    chat_id=update.effective_chat.id,
+                    media_type=media_type,
+                    tmdb_id=tmdb_id,
+                    context=context,
+                    origin="search"
+                )
             else:
                 await present_search_results(update, context, processing_msg, query, results, page=1)
         except Exception as e:
@@ -749,7 +909,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     set_ttl_item(context.user_data, "last_search_query", title)
                     set_ttl_item(context.user_data, "last_search_results", results)
                     set_ttl_item(context.user_data, "last_search_page", 1)
-                    await show_search_item_details(processing_msg, media_type, tmdb_id, context, is_single_result=True)
+                    await processing_msg.delete()
+                    await show_confirmation_card(
+                        chat_id=update.effective_chat.id,
+                        media_type=media_type,
+                        tmdb_id=tmdb_id,
+                        context=context,
+                        origin="search"
+                    )
                     return
 
             # Store search in user_data
@@ -761,7 +928,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(results) == 1:
                 tmdb_id = results[0]["id"]
                 media_type = results[0].get("mediaType", "movie")
-                await show_search_item_details(processing_msg, media_type, tmdb_id, context, is_single_result=True)
+                await processing_msg.delete()
+                await show_confirmation_card(
+                    chat_id=update.effective_chat.id,
+                    media_type=media_type,
+                    tmdb_id=tmdb_id,
+                    context=context,
+                    origin="search"
+                )
             else:
                 await present_search_results(
                     update=update,
@@ -798,7 +972,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(results) == 1:
                 tmdb_id = results[0]["id"]
                 media_type = results[0].get("mediaType", "movie")
-                await show_search_item_details(processing_msg, media_type, tmdb_id, context, is_single_result=True)
+                await processing_msg.delete()
+                await show_confirmation_card(
+                    chat_id=update.effective_chat.id,
+                    media_type=media_type,
+                    tmdb_id=tmdb_id,
+                    context=context,
+                    origin="search"
+                )
             else:
                 await present_search_results(
                     update=update,
@@ -858,7 +1039,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     elif action == "search_sel":
         media_type = parts[1]
         tmdb_id = int(parts[2])
-        await show_search_item_details(query.message, media_type, tmdb_id, context, is_single_result=False)
+        await query.message.delete()
+        await show_confirmation_card(query.message.chat_id, media_type, tmdb_id, context, origin="search_sel")
 
     elif action == "search_req":
         # Redirect to confirmation card instead of auto-submitting

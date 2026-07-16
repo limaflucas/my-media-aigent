@@ -1,8 +1,17 @@
 import logging
 
 import requests
+from tenacity import Retrying, stop_after_attempt, wait_exponential, retry_if_exception
 
 logger = logging.getLogger(__name__)
+
+
+def _is_retryable_exception(exception: Exception) -> bool:
+    """Checks if the requests exception is retryable (timeouts, connection issues, or 5xx server errors)."""
+    if isinstance(exception, requests.exceptions.HTTPError):
+        # Only retry on server-side errors (500+), not client issues (400-499)
+        return exception.response is not None and exception.response.status_code >= 500
+    return isinstance(exception, (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.RequestException))
 
 STATUS_MAP = {
     1: "🆕 Not Requested",  # Unknown / Not Requested in library
@@ -44,14 +53,27 @@ class OverseerrClient:
     def _post(self, path: str, json_data: dict) -> dict | None:
         url = f"{self.base_url}{path}"
         try:
-            response = requests.post(url, headers=self.headers, json=json_data, timeout=10, verify=self.ssl_verify)
-            response.raise_for_status()
-            return response.json()
+            for attempt in Retrying(
+                stop=stop_after_attempt(5),
+                wait=wait_exponential(multiplier=1, min=2, max=10),
+                retry=retry_if_exception(_is_retryable_exception),
+                reraise=True,
+                before_sleep=lambda retry_state: logger.warning(
+                    f"Overseerr POST request to {path} failed (attempt {retry_state.attempt_number}). "
+                    f"Retrying in {retry_state.next_action.sleep} seconds..."
+                )
+            ):
+                with attempt:
+                    response = requests.post(url, headers=self.headers, json=json_data, timeout=10, verify=self.ssl_verify)
+                    response.raise_for_status()
+                    return response.json()
         except Exception as e:
             logger.error(f"Overseerr POST request to {path} failed: {e}")
             # Try to log detailed error response if available
             try:
-                logger.error(f"Response body: {response.text}")
+                resp = e.response if isinstance(e, requests.exceptions.HTTPError) else None
+                if resp:
+                    logger.error(f"Response body: {resp.text}")
             except Exception:
                 pass
             return None
