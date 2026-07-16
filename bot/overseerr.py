@@ -1,4 +1,5 @@
 import logging
+
 import requests
 
 logger = logging.getLogger(__name__)
@@ -11,13 +12,13 @@ STATUS_MAP = {
     5: "✅ Available"
 }
 
+
 class OverseerrClient:
     def __init__(self, base_url: str, api_key: str, ssl_verify: bool = True):
         # Ensure base_url doesn't end with a slash, then append /api/v1
         self.base_url = base_url.rstrip("/")
         if not self.base_url.endswith("/api/v1"):
             self.base_url = f"{self.base_url}/api/v1"
-            
         self.headers = {
             "X-Api-Key": api_key,
             "Content-Type": "application/json",
@@ -84,7 +85,6 @@ class OverseerrClient:
         """Converts mediaInfo object from API to a human-readable status."""
         if not media_info:
             return STATUS_MAP[1]
-        
         status_num = media_info.get("status", 1)
         return STATUS_MAP.get(status_num, STATUS_MAP[1])
 
@@ -97,7 +97,6 @@ class OverseerrClient:
             "mediaType": media_type,
             "mediaId": tmdb_id
         }
-
         if media_type == "tv":
             if not seasons:
                 # Fetch TV details to get all season numbers
@@ -114,9 +113,7 @@ class OverseerrClient:
                         seasons = [1]
                 else:
                     seasons = [1]
-            
             payload["seasons"] = seasons
-
         logger.info(f"Submitting request: {payload}")
         return self._post("/request", payload)
 

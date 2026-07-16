@@ -1,6 +1,8 @@
 import os
 import re
 import logging
+import time
+from io import BytesIO
 
 try:
     import truststore
@@ -8,7 +10,8 @@ try:
 except ImportError:
     pass
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import requests
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -17,6 +20,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters,
 )
+from rapidfuzz import fuzz
 
 from bot.parser import extract_media_info_from_url
 from bot.overseerr import OverseerrClient
@@ -27,6 +31,11 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+TMDB_IMG_BASE = "https://image.tmdb.org/t/p/w500"
+PAGE_SIZE = 7
+CONFIDENCE_THRESHOLD = 80  # fuzzy match score out of 100
+
 
 def get_secret(key: str, default: str = None) -> str | None:
     """
@@ -56,6 +65,7 @@ def get_secret(key: str, default: str = None) -> str | None:
 
     # 3. Fallback to direct environment variable
     return os.getenv(key, default)
+
 
 # Read configuration using the secret helper
 TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN")
@@ -97,7 +107,6 @@ LANGUAGE_MAP = {
 # Initialize Overseerr Client
 overseerr = OverseerrClient(OVERSEERR_URL, OVERSEERR_API_KEY, ssl_verify=OVERSEERR_SSL_VERIFY)
 
-import time
 
 def set_ttl_item(user_data: dict, key: str, value: any, ttl_seconds: int = 2700):
     """Stores an item in user_data with an expiration timestamp (default 45 mins)."""
@@ -106,18 +115,18 @@ def set_ttl_item(user_data: dict, key: str, value: any, ttl_seconds: int = 2700)
         "expires_at": time.time() + ttl_seconds
     }
 
+
 def get_ttl_item(user_data: dict, key: str) -> any:
     """Retrieves an item from user_data if it has not expired yet."""
     item = user_data.get(key)
     if not item:
         return None
-    
     if time.time() > item.get("expires_at", 0):
         # Evict expired item
         user_data.pop(key, None)
         return None
-        
     return item.get("value")
+
 
 def cleanup_expired_items(user_data: dict):
     """Removes all expired TTL items from user_data."""
@@ -128,6 +137,14 @@ def cleanup_expired_items(user_data: dict):
     ]
     for k in expired_keys:
         user_data.pop(k, None)
+
+
+def build_poster_url(details: dict) -> str | None:
+    """Builds a full TMDB image URL from the posterPath field."""
+    path = details.get("posterPath") or details.get("backdropPath")
+    if path:
+        return f"{TMDB_IMG_BASE}{path}"
+    return None
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -141,7 +158,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• TMDB (e.g., `themoviedb.org/movie/...`)\n"
         "• MyAnimeList (e.g., `myanimelist.net/anime/...`)\n"
         "• AniList (e.g., `anilist.co/anime/...`)\n"
-        "• Netflix (e.g., `netflix.com/title/...`)\n\n"
+        "• Netflix (e.g., `netflix.com/title/...`)\n"
+        "• YouTube videos/shorts\n"
+        "• Instagram posts/reels/videos\n"
+        "• Facebook videos/posts\n"
+        "• Any web page with movie/TV metadata\n\n"
         "Alternatively, you can just type the **title** of the movie/show, and I will search for it directly!\n\n"
         "ℹ️ **Requests Management:**\n"
         "Use `/seerr [number]` to view and manage recent requests (default is last 3 requests)."
@@ -156,24 +177,22 @@ async def display_requests_list(message, limit: int, skip: int = 0):
         if data is None:
             await message.edit_text("❌ **Failed to connect to Seerr.** Please check connection details or logs.", parse_mode="Markdown")
             return
-
         if "results" not in data or not data["results"]:
             await message.edit_text("📭 **No requests found on Seerr.**", parse_mode="Markdown")
             return
 
         results = data["results"]
-        
         # Build the message text and buttons
         text_lines = [f"📋 **Last {len(results)} Requests on Seerr:**\n"]
         keyboard = []
-        
+
         for req in results:
             req_id = req.get("id")
             req_status = req.get("status")
             media_info = req.get("media", {})
             tmdb_id = media_info.get("tmdbId")
             media_type = media_info.get("mediaType", "movie")
-            
+
             # Map request status to human-readable
             # MediaRequestStatus: 1 = PENDING, 2 = APPROVED, 3 = DECLINED, 4 = FAILED, 5 = COMPLETED
             status_map = {
@@ -184,7 +203,7 @@ async def display_requests_list(message, limit: int, skip: int = 0):
                 5: "🎉 Completed"
             }
             status_str = status_map.get(req_status, f"Unknown ({req_status})")
-            
+
             # Fetch details to get the media title/year
             title = None
             year = None
@@ -193,32 +212,31 @@ async def display_requests_list(message, limit: int, skip: int = 0):
                     details = overseerr.get_movie_details(tmdb_id)
                 else:
                     details = overseerr.get_tv_details(tmdb_id)
-                
                 if details:
                     title = details.get("title") if media_type == "movie" else details.get("name")
                     release_date = details.get("releaseDate") if media_type == "movie" else details.get("firstAirDate")
                     year = release_date.split("-")[0] if release_date else None
             except Exception as e:
                 logger.error(f"Failed to fetch details for tmdbId {tmdb_id}: {e}")
-                
+
             if not title:
                 title = f"TMDB {tmdb_id}"
-            
+
             media_emoji = "🎬" if media_type == "movie" else "📺"
             display_title = f"{media_emoji} {title}"
             if year:
                 display_title += f" ({year})"
-                
+
             text_lines.append(f"**#{req_id}** — {display_title}\n• Status: {status_str}\n")
-            
+
             # Button to select this request
             # Callback data format: req_sel:{request_id}:{limit}
             keyboard.append([
                 InlineKeyboardButton(f"🔎 Manage #{req_id}: {title[:20]}...", callback_data=f"req_sel:{req_id}:{limit}")
             ])
-            
+
         keyboard.append([InlineKeyboardButton("❌ Close", callback_data="cancel")])
-        
+
         await message.edit_text(
             "\n".join(text_lines),
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -239,12 +257,12 @@ async def display_request_details(message, request_id: int, limit: int):
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back to List", callback_data=f"req_list:{limit}")]])
             )
             return
-            
+
         req_status = req.get("status")
         media_info = req.get("media", {})
         tmdb_id = media_info.get("tmdbId")
         media_type = media_info.get("mediaType", "movie")
-        
+
         status_map = {
             1: "⏳ Pending Approval",
             2: "✅ Approved",
@@ -253,7 +271,7 @@ async def display_request_details(message, request_id: int, limit: int):
             5: "🎉 Completed"
         }
         status_str = status_map.get(req_status, f"Unknown ({req_status})")
-        
+
         # Fetch details to get the media title/year
         title = None
         year = None
@@ -263,7 +281,6 @@ async def display_request_details(message, request_id: int, limit: int):
                 details = overseerr.get_movie_details(tmdb_id)
             else:
                 details = overseerr.get_tv_details(tmdb_id)
-            
             if details:
                 title = details.get("title") if media_type == "movie" else details.get("name")
                 release_date = details.get("releaseDate") if media_type == "movie" else details.get("firstAirDate")
@@ -271,15 +288,15 @@ async def display_request_details(message, request_id: int, limit: int):
                 overview = details.get("overview")
         except Exception as e:
             logger.error(f"Failed to fetch details for tmdbId {tmdb_id}: {e}")
-            
+
         if not title:
             title = f"TMDB {tmdb_id}"
-            
+
         media_emoji = "🎬" if media_type == "movie" else "📺"
         display_title = f"{media_emoji} {title}"
         if year:
             display_title += f" ({year})"
-            
+
         requested_by = req.get("requestedBy", {})
         username = requested_by.get("username", "Unknown")
         created_at = req.get("createdAt", "N/A")
@@ -298,21 +315,18 @@ async def display_request_details(message, request_id: int, limit: int):
             f"**Requested By:** {username}\n"
             f"**Date:** {created_at}\n\n"
         )
-        
         if overview:
             if len(overview) > 200:
                 overview = overview[:200] + "..."
             text += f"_{overview}_\n"
 
         keyboard = []
-        
         # Action buttons based on status:
         # MediaRequestStatus: 1 = PENDING, 2 = APPROVED, 3 = DECLINED, 4 = FAILED, 5 = COMPLETED
         # - Approve: only if PENDING (1)
         # - Deny (Decline): if PENDING (1) or APPROVED (2)
         # - Retry: only if FAILED (4)
         # - Delete: always
-        
         action_row = []
         if req_status == 1:
             action_row.append(InlineKeyboardButton("✅ Approve", callback_data=f"req_act:approve:{request_id}:{limit}"))
@@ -321,13 +335,13 @@ async def display_request_details(message, request_id: int, limit: int):
             action_row.append(InlineKeyboardButton("❌ Deny", callback_data=f"req_act:decline:{request_id}:{limit}"))
         elif req_status == 4:
             action_row.append(InlineKeyboardButton("♻️ Retry", callback_data=f"req_act:retry:{request_id}:{limit}"))
-            
+
         if action_row:
             keyboard.append(action_row)
-            
+
         keyboard.append([InlineKeyboardButton("🗑️ Delete Request", callback_data=f"req_act:delete:{request_id}:{limit}")])
         keyboard.append([InlineKeyboardButton("◀️ Back to List", callback_data=f"req_list:{limit}")])
-        
+
         await message.edit_text(
             text,
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -348,7 +362,7 @@ async def show_search_item_details(message, media_type: str, tmdb_id: int, conte
             details = overseerr.get_movie_details(tmdb_id)
         else:
             details = overseerr.get_tv_details(tmdb_id)
-            
+
         if not details:
             await message.edit_text(
                 "❌ Failed to load media details.",
@@ -360,7 +374,7 @@ async def show_search_item_details(message, media_type: str, tmdb_id: int, conte
         release_date = details.get("releaseDate") if media_type == "movie" else details.get("firstAirDate")
         year = release_date.split("-")[0] if release_date else "Unknown"
         overview = details.get("overview", "No overview available.")
-        
+
         # 1. Duration / Runtime
         if media_type == "movie":
             runtime = details.get("runtime")
@@ -398,7 +412,6 @@ async def show_search_item_details(message, media_type: str, tmdb_id: int, conte
         media_info = details.get("mediaInfo")
         status_str = overseerr.get_media_status_str(media_info)
         status_num = media_info.get("status", 1) if media_info else 1
-
         emoji = "🎬 Movie" if media_type == "movie" else "📺 TV Show"
 
         text = (
@@ -412,13 +425,11 @@ async def show_search_item_details(message, media_type: str, tmdb_id: int, conte
         )
 
         keyboard = []
-        
-        # Option 1: Request movie (or TV show)
+        # Option 1: Request movie (or TV show) - now goes to confirmation card
         req_btn_text = "✅ Request Movie" if media_type == "movie" else "✅ Request TV Show"
         if status_num in [2, 3]:
             req_btn_text = "♻️ Request Again"
-            
-        keyboard.append([InlineKeyboardButton(req_btn_text, callback_data=f"search_req:{media_type}:{tmdb_id}")])
+        keyboard.append([InlineKeyboardButton(req_btn_text, callback_data=f"confirm_req:{media_type}:{tmdb_id}")])
 
         # Option 2: Return to the results list
         if not is_single_result and get_ttl_item(context.user_data, "last_search_results"):
@@ -432,7 +443,6 @@ async def show_search_item_details(message, media_type: str, tmdb_id: int, conte
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
-
     except Exception as e:
         logger.error(f"Error showing search item details: {e}", exc_info=True)
         await message.edit_text(
@@ -464,6 +474,7 @@ async def seerr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     processing_msg = await message.reply_text("⏳ **Fetching requests from Seerr...**", parse_mode="Markdown")
     await display_requests_list(processing_msg, limit, 0)
 
+
 async def present_search_results(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -471,96 +482,151 @@ async def present_search_results(
     query: str,
     results: list,
     target_year: int = None,
-    target_type: str = None
+    target_type: str = None,
+    page: int = 1
 ):
-    """Formats and displays the top 5 search results to the user as inline buttons."""
+    """Formats and displays search results with pagination (7 per page)."""
     # Define sorting weight to bubble up the best matching items
     def sort_key(item):
         score = 0
         media_type = item.get("mediaType", "")
-        
         # Exact year match bonus
         release_date = item.get("releaseDate") or item.get("firstAirDate") or ""
         if target_year and release_date.startswith(str(target_year)):
             score += 10
-            
         # Target media type match bonus
         if target_type and media_type == target_type:
             score += 5
-            
         return score
 
     # Sort results
     sorted_results = sorted(results, key=sort_key, reverse=True)
-    top_results = sorted_results[:5]  # Limit to 5 results for clarity
+    total = len(sorted_results)
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+
+    start = (page - 1) * PAGE_SIZE
+    page_items = sorted_results[start:start + PAGE_SIZE]
+
+    # Store search state in user_data
+    set_ttl_item(context.user_data, "last_search_query", query)
+    set_ttl_item(context.user_data, "last_search_results", sorted_results)
+    set_ttl_item(context.user_data, "last_search_page", page)
 
     keyboard = []
-    for item in top_results:
+    for item in page_items:
         tmdb_id = item.get("id")
         media_type = item.get("mediaType", "movie")
         title = item.get("title") or item.get("name")
         release_date = item.get("releaseDate") or item.get("firstAirDate")
         year = release_date.split("-")[0] if release_date else "N/A"
-        
         emoji = "🎬" if media_type == "movie" else "📺"
         button_text = f"{emoji} {title} ({year})"
-        
-        # Callback data format: action:media_type:tmdb_id
+        # Callback data format: search_sel:media_type:tmdb_id
         callback_data = f"search_sel:{media_type}:{tmdb_id}"
         keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
-        
+
+    # Pagination row
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"search_page:{page-1}"))
+    nav_row.append(InlineKeyboardButton(f"📄 {page}/{total_pages}", callback_data="noop"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton("Next ➡️", callback_data=f"search_page:{page+1}"))
+    if nav_row:
+        keyboard.append(nav_row)
+
     keyboard.append([InlineKeyboardButton("❌ Cancel search", callback_data="cancel")])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
     await message_to_edit.edit_text(
-        f"🔍 **Search Results for:** _'{query}'_\nChoose the correct item to request:",
+        f"🔍 **Search Results for:** _'{query}'_\nChoose the correct item to request:\n\n_Page {page} of {total_pages}_",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
 
-async def show_item_details_from_dict(message, media_type: str, tmdb_id: int, details: dict):
-    """Updates the message with detailed metadata and a request button."""
-    title = details.get("title") if media_type == "movie" else details.get("name")
-    release_date = details.get("releaseDate") if media_type == "movie" else details.get("firstAirDate")
-    year = release_date.split("-")[0] if release_date else "N/A"
-    overview = details.get("overview", "No overview available.")
-    
-    # Truncate overview if too long for Telegram
-    if len(overview) > 300:
-        overview = overview[:300] + "..."
-        
-    media_info = details.get("mediaInfo")
-    status_str = overseerr.get_media_status_str(media_info)
-    status_num = media_info.get("status", 1) if media_info else 1
-    
-    emoji = "🎬 Movie" if media_type == "movie" else "📺 TV Show"
-    
-    text = (
-        f"**{title} ({year})**\n"
-        f"Type: {emoji}\n"
-        f"Status: {status_str}\n\n"
-        f"_{overview}_\n"
-    )
-    
-    keyboard = []
-    # If media is not available (status 5) or partially available (status 4)
-    if status_num in [1, 4]:
+
+async def show_confirmation_card(
+    chat_id: int,
+    media_type: str,
+    tmdb_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+    origin: str = "search"
+):
+    """
+    Displays a confirmation card with poster, current Seerr data, and
+    Confirm/Cancel buttons before submitting a request.
+    """
+    try:
         if media_type == "movie":
-            keyboard.append([InlineKeyboardButton("✅ Request Movie", callback_data=f"req:movie:{tmdb_id}")])
+            details = overseerr.get_movie_details(tmdb_id)
         else:
-            keyboard.append([InlineKeyboardButton("✅ Request TV Show (All Seasons)", callback_data=f"req:tv:{tmdb_id}")])
-    elif status_num in [2, 3]:
-        # Item requested but pending/processing, allow requesting again or show status
-        keyboard.append([InlineKeyboardButton("♻️ Request Again", callback_data=f"req:{media_type}:{tmdb_id}")])
-        
-    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await message.edit_text(
-        text,
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
-    )
+            details = overseerr.get_tv_details(tmdb_id)
+
+        if not details:
+            await context.bot.send_message(chat_id, "❌ Could not load media details for confirmation.")
+            return
+
+        title = details.get("title") if media_type == "movie" else details.get("name")
+        release_date = details.get("releaseDate") if media_type == "movie" else details.get("firstAirDate")
+        year = release_date.split("-")[0] if release_date else "Unknown"
+        overview = details.get("overview", "No overview available.")
+        overview = overview[:300] + "…" if len(overview) > 300 else overview
+
+        media_info = details.get("mediaInfo")
+        status_str = overseerr.get_media_status_str(media_info)
+        status_num = media_info.get("status", 1) if media_info else 1
+
+        # Build caption
+        caption = (
+            f"🧾 **Confirm Request**\n\n"
+            f"**{title} ({year})**\n"
+            f"• Type: {'🎬 Movie' if media_type == 'movie' else '📺 TV Show'}\n"
+            f"• Seerr Status: {status_str}\n\n"
+            f"📖 **Plot:**\n_{overview}_\n\n"
+            f"Confirm adding this to your library?"
+        )
+
+        # Build keyboard
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Confirm", callback_data=f"do_req:{media_type}:{tmdb_id}"),
+                InlineKeyboardButton("❌ Cancel", callback_data="cancel"),
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # Try to send with poster
+        poster_url = build_poster_url(details)
+        if poster_url:
+            try:
+                # Download the image to send as photo (more reliable than URL)
+                img_response = requests.get(poster_url, timeout=10)
+                img_response.raise_for_status()
+                photo_bytes = BytesIO(img_response.content)
+                photo_bytes.seek(0)
+                await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=photo_bytes,
+                    caption=caption,
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup,
+                )
+                return
+            except Exception as e:
+                logger.warning(f"Failed to send photo for TMDB {tmdb_id}: {e}. Falling back to text.")
+
+        # Fallback: text-only message
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=caption,
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+        )
+    except Exception as e:
+        logger.error(f"Error showing confirmation card: {e}", exc_info=True)
+        await context.bot.send_message(chat_id, "❌ An error occurred while preparing the confirmation.")
+
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Processes incoming messages. Detects links or performs direct keyword search."""
@@ -571,13 +637,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Look for URLs in the message
     urls = re.findall(r"https?://[^\s]+", message_text)
-    
+
     # If no URL is found, treat the message as a direct search query
     if not urls:
         query = message_text.strip()
         if len(query) < 2:
             return
-        
+
         processing_msg = await update.message.reply_text("🔍 **Searching Overseerr...**", parse_mode="Markdown")
         try:
             results = overseerr.search(query)
@@ -587,10 +653,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="Markdown"
                 )
                 return
-            
+
             # Store search in user_data
             set_ttl_item(context.user_data, "last_search_query", query)
             set_ttl_item(context.user_data, "last_search_results", results)
+            set_ttl_item(context.user_data, "last_search_page", 1)
 
             # If search returns only one result, display general information directly
             if len(results) == 1:
@@ -598,16 +665,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 media_type = results[0].get("mediaType", "movie")
                 await show_search_item_details(processing_msg, media_type, tmdb_id, context, is_single_result=True)
             else:
-                await present_search_results(update, context, processing_msg, query, results)
+                await present_search_results(update, context, processing_msg, query, results, page=1)
         except Exception as e:
             logger.error(f"Search failed: {e}", exc_info=True)
             await processing_msg.edit_text("❌ An error occurred while searching.")
         return
 
-    # If URL is found, parse and request/search
+    # If URL is found, parse and search
     url = urls[0]
     processing_msg = await update.message.reply_text("🔍 **Parsing link and searching Seerr...**", parse_mode="Markdown")
-
     try:
         media_info = extract_media_info_from_url(url)
         if not media_info:
@@ -618,64 +684,136 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Direct TMDB lookup bypasses search and requests media directly
+        # Direct TMDB lookup: show confirmation card instead of auto-submitting
         if media_info.get("source") == "tmdb_url":
             tmdb_id = media_info["tmdb_id"]
             media_type = media_info["media_type"]
-            
-            await processing_msg.edit_text(f"⏳ Submitting request for TMDB ID **{tmdb_id}** ({media_type})...", parse_mode="Markdown")
-            
-            result = overseerr.request_media(media_type, tmdb_id)
-            if result:
-                await processing_msg.edit_text(
-                    f"🎉 **Request Submitted Successfully!**\n\n"
-                    f"TMDB ID **{tmdb_id}** ({media_type}) has been requested in Seerr.",
-                    parse_mode="Markdown"
-                )
-            else:
-                await processing_msg.edit_text(
-                    f"❌ **Failed to request TMDB ID {tmdb_id}.**\n\n"
-                    "Please verify Overseerr API connection or logs.",
-                    parse_mode="Markdown"
-                )
-            return
-
-        # Regular Title Search
-        title = media_info["title"]
-        year = media_info.get("year")
-        media_type = media_info.get("media_type")
-
-        results = overseerr.search(title)
-        if not results:
-            await processing_msg.edit_text(
-                f"❌ No results found on Seerr for **'{title}'**.",
-                parse_mode="Markdown"
-            )
-            return
-
-        # Store search in user_data
-        set_ttl_item(context.user_data, "last_search_query", title)
-        set_ttl_item(context.user_data, "last_search_results", results)
-
-        # If search returns only one result, display general information directly
-        if len(results) == 1:
-            tmdb_id = results[0]["id"]
-            media_type = results[0].get("mediaType", "movie")
-            await show_search_item_details(processing_msg, media_type, tmdb_id, context, is_single_result=True)
-        else:
-            await present_search_results(
-                update=update,
+            await processing_msg.delete()
+            await show_confirmation_card(
+                chat_id=update.effective_chat.id,
+                media_type=media_type,
+                tmdb_id=tmdb_id,
                 context=context,
-                message_to_edit=processing_msg,
-                query=title,
-                results=results,
-                target_year=year,
-                target_type=media_type
+                origin="tmdb_url"
             )
+            return
 
+        # If we got a title from a social platform or generic scrape,
+        # run it through Seerr search and check for a confident match
+        if media_info.get("source") in ("youtube_oembed", "social_og", "meta_tags", "json_ld", "imdb_suggest"):
+            title = media_info.get("title", "")
+            year = media_info.get("year")
+            media_type_hint = media_info.get("media_type")
+
+            if not title:
+                await processing_msg.edit_text(
+                    "❌ Could not extract a title from that link.",
+                    parse_mode="Markdown"
+                )
+                return
+
+            results = overseerr.search(title)
+            if not results:
+                await processing_msg.edit_text(
+                    f"❌ No results found on Seerr for **'{title}'**.",
+                    parse_mode="Markdown"
+                )
+                return
+
+            # If we have a year or media_type hint, use it for sorting
+            target_year = year
+            target_type = media_type_hint
+
+            # For social/generic sources, do fuzzy matching to check confidence
+            if media_info.get("source") in ("youtube_oembed", "social_og", "meta_tags"):
+                best = max(results, key=lambda r: fuzz.token_sort_ratio(
+                    title.lower(),
+                    (r.get("title") or r.get("name") or "").lower()
+                ))
+                best_title = best.get("title") or best.get("name") or ""
+                score = fuzz.token_sort_ratio(title.lower(), best_title.lower())
+
+                if score < CONFIDENCE_THRESHOLD:
+                    await processing_msg.edit_text(
+                        f"❓ Couldn't confidently match _'{title}'_ to a movie/TV show.\n"
+                        f"Best match was _'{best_title}'_ with {score}% similarity.\n\n"
+                        f"Try searching by title directly.",
+                        parse_mode="Markdown"
+                    )
+                    return
+
+                # If we have a confident single match, go straight to details
+                if len(results) == 1:
+                    tmdb_id = best["id"]
+                    media_type = best.get("mediaType", "movie")
+                    set_ttl_item(context.user_data, "last_search_query", title)
+                    set_ttl_item(context.user_data, "last_search_results", results)
+                    set_ttl_item(context.user_data, "last_search_page", 1)
+                    await show_search_item_details(processing_msg, media_type, tmdb_id, context, is_single_result=True)
+                    return
+
+            # Store search in user_data
+            set_ttl_item(context.user_data, "last_search_query", title)
+            set_ttl_item(context.user_data, "last_search_results", results)
+            set_ttl_item(context.user_data, "last_search_page", 1)
+
+            # If search returns only one result, display general information directly
+            if len(results) == 1:
+                tmdb_id = results[0]["id"]
+                media_type = results[0].get("mediaType", "movie")
+                await show_search_item_details(processing_msg, media_type, tmdb_id, context, is_single_result=True)
+            else:
+                await present_search_results(
+                    update=update,
+                    context=context,
+                    message_to_edit=processing_msg,
+                    query=title,
+                    results=results,
+                    target_year=target_year,
+                    target_type=target_type,
+                    page=1
+                )
+        else:
+            # Fallback for unknown sources
+            title = media_info.get("title", "")
+            if not title:
+                await processing_msg.edit_text(
+                    "❌ Could not extract media details from that link.",
+                    parse_mode="Markdown"
+                )
+                return
+
+            results = overseerr.search(title)
+            if not results:
+                await processing_msg.edit_text(
+                    f"❌ No results found on Seerr for **'{title}'**.",
+                    parse_mode="Markdown"
+                )
+                return
+
+            set_ttl_item(context.user_data, "last_search_query", title)
+            set_ttl_item(context.user_data, "last_search_results", results)
+            set_ttl_item(context.user_data, "last_search_page", 1)
+
+            if len(results) == 1:
+                tmdb_id = results[0]["id"]
+                media_type = results[0].get("mediaType", "movie")
+                await show_search_item_details(processing_msg, media_type, tmdb_id, context, is_single_result=True)
+            else:
+                await present_search_results(
+                    update=update,
+                    context=context,
+                    message_to_edit=processing_msg,
+                    query=title,
+                    results=results,
+                    target_year=media_info.get("year"),
+                    target_type=media_info.get("media_type"),
+                    page=1
+                )
     except Exception as e:
         logger.error(f"Error handling URL message: {e}", exc_info=True)
         await processing_msg.edit_text("❌ An error occurred while parsing the link.")
+
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Processes button clicks from inline keyboards."""
@@ -686,73 +824,36 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     data = query.data
     logger.info(f"Callback trigger: {data}")
 
+    # Handle no-op (e.g., page indicator button)
+    if data == "noop":
+        return
+
     if data == "cancel":
         context.user_data.pop("last_search_query", None)
         context.user_data.pop("last_search_results", None)
-        await query.message.delete()
+        context.user_data.pop("last_search_page", None)
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
         return
 
     parts = data.split(":")
     action = parts[0]
 
     if action == "sel":
-        # Select search item (directly submit request to bypass broken movie/tv details endpoints)
+        # Legacy: redirect to confirmation
         media_type = parts[1]
         tmdb_id = int(parts[2])
-
-        # Extract title from the clicked button text
-        title = "Selected Item"
-        if query.message.reply_markup and query.message.reply_markup.inline_keyboard:
-            for row in query.message.reply_markup.inline_keyboard:
-                for button in row:
-                    if button.callback_data == data:
-                        title = button.text
-                        break
-        
-        # Strip emoji from title if present
-        if title.startswith("🎬") or title.startswith("📺"):
-            title = title[2:].strip()
-
-        await query.message.edit_text(f"⏳ Submitting request for **{title}**...", parse_mode="Markdown")
-
-        result = overseerr.request_media(media_type, tmdb_id)
-        if result:
-            await query.message.edit_text(
-                f"🎉 **Request Submitted Successfully!**\n\n"
-                f"**{title}** has been requested in Seerr.",
-                parse_mode="Markdown"
-            )
-        else:
-            await query.message.edit_text(
-                f"❌ **Failed to request {title}.**\n\n"
-                "Please verify Overseerr API connection or logs.",
-                parse_mode="Markdown"
-            )
+        await query.message.delete()
+        await show_confirmation_card(query.message.chat_id, media_type, tmdb_id, context, origin="legacy_sel")
 
     elif action == "req":
-        # Submit the request (kept as fallback)
+        # Legacy fallback: redirect to confirmation
         media_type = parts[1]
         tmdb_id = int(parts[2])
-
-        # Extract title from the interactive message to confirm it to the user
-        first_line = query.message.text.split("\n")[0]
-        title = first_line.replace("**", "").strip()
-
-        await query.message.edit_text(f"⏳ Submitting request for **{title}**...", parse_mode="Markdown")
-
-        result = overseerr.request_media(media_type, tmdb_id)
-        if result:
-            await query.message.edit_text(
-                f"🎉 **Request Submitted Successfully!**\n\n"
-                f"**{title}** has been requested in Seerr.",
-                parse_mode="Markdown"
-            )
-        else:
-            await query.message.edit_text(
-                f"❌ **Failed to request {title}.**\n\n"
-                "Please verify Overseerr API connection or logs.",
-                parse_mode="Markdown"
-            )
+        await query.message.delete()
+        await show_confirmation_card(query.message.chat_id, media_type, tmdb_id, context, origin="legacy_req")
 
     elif action == "search_sel":
         media_type = parts[1]
@@ -760,38 +861,93 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await show_search_item_details(query.message, media_type, tmdb_id, context, is_single_result=False)
 
     elif action == "search_req":
+        # Redirect to confirmation card instead of auto-submitting
         media_type = parts[1]
         tmdb_id = int(parts[2])
-        
-        # Get title from message first line
-        first_line = query.message.text.split("\n")[0]
-        title = first_line.replace("ℹ️", "").replace("**", "").strip()
+        await query.message.delete()
+        await show_confirmation_card(query.message.chat_id, media_type, tmdb_id, context, origin="search_req")
 
-        await query.message.edit_text(f"⏳ Submitting request for **{title}**...", parse_mode="Markdown")
+    elif action == "confirm_req":
+        # Show confirmation card
+        media_type = parts[1]
+        tmdb_id = int(parts[2])
+        await query.message.delete()
+        await show_confirmation_card(query.message.chat_id, media_type, tmdb_id, context, origin="confirm")
+
+    elif action == "do_req":
+        # Actually submit the request after confirmation
+        media_type = parts[1]
+        tmdb_id = int(parts[2])
+
+        # Get title from the current message caption or text
+        first_line = (query.message.caption or query.message.text or "").split("\n")[0]
+        title = first_line.replace("**", "").replace("🧾", "").strip()
+
+        try:
+            await query.message.edit_caption(
+                caption="⏳ **Submitting request...**",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            # If it's not a photo message, try edit_text
+            try:
+                await query.message.edit_text("⏳ **Submitting request...**", parse_mode="Markdown")
+            except Exception:
+                pass
 
         result = overseerr.request_media(media_type, tmdb_id)
         if result:
             context.user_data.pop("last_search_query", None)
             context.user_data.pop("last_search_results", None)
-            await query.message.edit_text(
+            context.user_data.pop("last_search_page", None)
+
+            success_text = (
                 f"🎉 **Request Submitted Successfully!**\n\n"
-                f"**{title}** has been requested in Seerr.",
-                parse_mode="Markdown"
+                f"**{title}** has been requested in Seerr."
             )
+            try:
+                await query.message.edit_caption(
+                    caption=success_text,
+                    parse_mode="Markdown",
+                    reply_markup=None
+                )
+            except Exception:
+                await query.message.edit_text(success_text, parse_mode="Markdown", reply_markup=None)
         else:
-            await query.message.edit_text(
+            error_text = (
                 f"❌ **Failed to request {title}.**\n\n"
-                "Please verify Overseerr API connection or logs.",
-                parse_mode="Markdown"
+                "Please verify Overseerr API connection or logs."
             )
+            try:
+                await query.message.edit_caption(
+                    caption=error_text,
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("✅ Retry", callback_data=f"do_req:{media_type}:{tmdb_id}"),
+                        InlineKeyboardButton("❌ Cancel", callback_data="cancel"),
+                    ]])
+                )
+            except Exception:
+                await query.message.edit_text(error_text, parse_mode="Markdown")
 
     elif action == "search_ret":
         query_text = get_ttl_item(context.user_data, "last_search_query")
         results = get_ttl_item(context.user_data, "last_search_results")
+        page = get_ttl_item(context.user_data, "last_search_page") or 1
         if query_text and results:
-            await present_search_results(update, context, query.message, query_text, results)
+            await present_search_results(update, context, query.message, query_text, results, page=page)
         else:
             await query.message.edit_text("⚠️ No search history found (or it has expired). Please search again by typing the title.")
+
+    elif action == "search_page":
+        # Pagination navigation
+        page = int(parts[1])
+        query_text = get_ttl_item(context.user_data, "last_search_query")
+        results = get_ttl_item(context.user_data, "last_search_results")
+        if query_text and results:
+            await present_search_results(update, context, query.message, query_text, results, page=page)
+        else:
+            await query.message.edit_text("⚠️ Search expired. Please search again by typing the title.")
 
     elif action == "req_list":
         limit = int(parts[1])
@@ -806,7 +962,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         act = parts[1]
         request_id = int(parts[2])
         limit = int(parts[3])
-
         keyboard = [[InlineKeyboardButton("◀️ Back to List", callback_data=f"req_list:{limit}")]]
 
         if act == "approve":
@@ -826,7 +981,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode="Markdown"
                 )
-
         elif act == "decline":
             await query.message.edit_text(f"⏳ Declining request #{request_id}...")
             res = overseerr.decline_request(request_id)
@@ -844,7 +998,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode="Markdown"
                 )
-
         elif act == "retry":
             await query.message.edit_text(f"⏳ Retrying request #{request_id}...")
             res = overseerr.retry_request(request_id)
@@ -862,7 +1015,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode="Markdown"
                 )
-
         elif act == "delete":
             await query.message.edit_text(f"⏳ Deleting request #{request_id}...")
             res = overseerr.delete_request(request_id)
@@ -880,6 +1032,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     parse_mode="Markdown"
                 )
 
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Log the error and send a telegram message to notify the user/developer."""
     logger.error("Exception while handling an update:", exc_info=context.error)
@@ -891,13 +1044,14 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
         except Exception:
             pass
 
+
 def main():
     if not TELEGRAM_BOT_TOKEN or not OVERSEERR_API_KEY:
         print("CRITICAL: TELEGRAM_BOT_TOKEN and OVERSEERR_API_KEY must be set in environmental variables.")
         return
 
     logger.info("Starting Telegram Bot...")
-    
+
     # Build application
     application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -912,6 +1066,7 @@ def main():
 
     # Run bot
     application.run_polling()
+
 
 if __name__ == "__main__":
     main()
