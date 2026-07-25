@@ -16,8 +16,8 @@ def test_settings_validation_success():
     assert settings.TELEGRAM_BOT_TOKEN.get_secret_value() == "test_bot_token"
     assert str(settings.OVERSEERR_URL).rstrip("/") == "http://localhost:5055"
     assert settings.OVERSEERR_API_KEY.get_secret_value() == "test_api_key"
-    assert settings.LITELLM_BASE_URL == "http://localhost:4000/v1"
-    assert settings.DEFAULT_LLM_MODEL == "gemma4-fit"
+    assert str(settings.LITELLM_BASE_URL).rstrip("/") == "http://localhost:4000/v1"
+    assert settings.DEFAULT_LLM_MODEL.get_secret_value() == "gemma4-fit"
 
 
 def test_settings_validation_missing_required(monkeypatch):

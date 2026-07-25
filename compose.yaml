@@ -3,7 +3,12 @@ services:
     image: registry.homelab/homelab/my-media-aigent:latest
     environment:
       - TZ=America/Halifax
-      - OVERSEERR_URL=http://seerr:5055
+      - OVERSEERR_URL=${OVERSEERR_URL}
+      - LITELLM_BASE_URL=${LITELLM_BASE_URL}
+      - LITELLM_API_KEY=${LITELLM_API_KEY}
+      - DEFAULT_LLM_MODEL=${DEFAULT_LLM_MODEL}
+      - OVERSEERR_API_KEY=${OVERSEERR_API_KEY}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
     deploy:
       replicas: 1
       restart_policy:

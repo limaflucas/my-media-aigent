@@ -7,7 +7,7 @@ resolves Docker secrets, and formats human-readable error messages on failure.
 import os
 import sys
 import logging
-from typing import List, Optional
+from typing import List, Optional, Any
 from pydantic import HttpUrl, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -15,8 +15,8 @@ logger = logging.getLogger(__name__)
 
 VAR_EXAMPLES = {
     "TELEGRAM_BOT_TOKEN": "123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ (or TELEGRAM_BOT_TOKEN_FILE / Docker secret)",
-    "OVERSEERR_URL": "http://seerr:5055",
     "OVERSEERR_API_KEY": "your_overseerr_api_key (or OVERSEERR_API_KEY_FILE / Docker secret)",
+    "OVERSEERR_URL": "http://seerr:5055",
     "LITELLM_BASE_URL": "http://litellm:4000/v1",
     "LITELLM_API_KEY": "sk-litellm-dummy (or LITELLM_API_KEY_FILE / Docker secret)",
     "DEFAULT_LLM_MODEL": "gemma4-fit",
@@ -57,15 +57,15 @@ class Settings(BaseSettings):
     TELEGRAM_ALLOWED_USERS: List[int] = []
 
     # Overseerr Service Configuration
-    OVERSEERR_URL: HttpUrl
+    OVERSEERR_URL: HttpUrl = HttpUrl("http://seerr:5055")
     OVERSEERR_API_KEY: SecretStr
     OVERSEERR_TIMEOUT: float = 10.0
     OVERSEERR_SSL_VERIFY: bool = True
 
     # LiteLLM / Local AI Lab Configuration
-    LITELLM_BASE_URL: str
+    LITELLM_BASE_URL: HttpUrl = HttpUrl("http://litellm:4000/v1")
     LITELLM_API_KEY: SecretStr
-    DEFAULT_LLM_MODEL: str
+    DEFAULT_LLM_MODEL: SecretStr
     MAX_TRANSCRIPT_TOKENS: int = 3000
 
     # Application Behavior
@@ -77,7 +77,7 @@ class Settings(BaseSettings):
         extra="ignore"
     )
 
-    @field_validator("TELEGRAM_BOT_TOKEN", "OVERSEERR_API_KEY", "LITELLM_API_KEY", mode="after")
+    @field_validator("TELEGRAM_BOT_TOKEN", "OVERSEERR_API_KEY", "LITELLM_API_KEY", "DEFAULT_LLM_MODEL", mode="after")
     @classmethod
     def validate_non_empty_secret(cls, v: SecretStr) -> SecretStr:
         """Ensures secret values are not empty strings."""
@@ -85,17 +85,17 @@ class Settings(BaseSettings):
             raise ValueError("Secret value cannot be empty")
         return v
 
-    @field_validator("LITELLM_BASE_URL", "DEFAULT_LLM_MODEL", mode="after")
+    @field_validator("LITELLM_BASE_URL", mode="after")
     @classmethod
-    def validate_non_empty_str(cls, v: str) -> str:
-        """Ensures configuration string values are not empty."""
-        if not v.strip():
-            raise ValueError("Configuration string cannot be empty")
-        return v.strip()
+    def validate_non_empty_url(cls, v: Any) -> Any:
+        """Ensures URL configuration values are not empty."""
+        if not str(v).strip():
+            raise ValueError("URL value cannot be empty")
+        return v
 
     def __init__(self, **kwargs):
         """Initializes settings, resolving Docker/file secrets if not explicitly provided."""
-        for secret_key in ["TELEGRAM_BOT_TOKEN", "OVERSEERR_API_KEY", "LITELLM_API_KEY"]:
+        for secret_key in ["TELEGRAM_BOT_TOKEN", "OVERSEERR_API_KEY", "LITELLM_API_KEY", "DEFAULT_LLM_MODEL"]:
             if secret_key not in kwargs or not kwargs.get(secret_key):
                 val = _read_secret(secret_key)
                 if val:

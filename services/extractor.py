@@ -11,6 +11,7 @@ import logging
 from youtube_transcript_api import YouTubeTranscriptApi
 import yt_dlp
 from openai import AsyncOpenAI
+from pydantic import SecretStr
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -21,9 +22,11 @@ class MediaExtractorService:
 
     def __init__(self) -> None:
         """Initializes the MediaExtractorService with LiteLLM OpenAI client."""
+        base_url = str(settings.LITELLM_BASE_URL)
+        api_key = settings.LITELLM_API_KEY.get_secret_value() if isinstance(settings.LITELLM_API_KEY, SecretStr) else str(settings.LITELLM_API_KEY)
         self.ai_client = AsyncOpenAI(
-            base_url=settings.LITELLM_BASE_URL,
-            api_key=settings.LITELLM_API_KEY.get_secret_value()
+            base_url=base_url,
+            api_key=api_key
         )
 
     @staticmethod

@@ -3,6 +3,7 @@ import re
 import logging
 from typing import List
 from openai import AsyncOpenAI
+from pydantic import SecretStr
 from config import settings
 from models.media import ExtractedMediaItem, VideoMediaExtractionResult
 
@@ -11,10 +12,17 @@ logger = logging.getLogger(__name__)
 
 class LLMService:
     def __init__(self):
+        base_url = str(settings.LITELLM_BASE_URL)
+        api_key = settings.LITELLM_API_KEY.get_secret_value() if isinstance(settings.LITELLM_API_KEY, SecretStr) else str(settings.LITELLM_API_KEY)
         self.client = AsyncOpenAI(
-            base_url=settings.LITELLM_BASE_URL,
-            api_key=settings.LITELLM_API_KEY.get_secret_value()
+            base_url=base_url,
+            api_key=api_key
         )
+
+    def _get_model_name(self) -> str:
+        if isinstance(settings.DEFAULT_LLM_MODEL, SecretStr):
+            return settings.DEFAULT_LLM_MODEL.get_secret_value()
+        return str(settings.DEFAULT_LLM_MODEL)
 
     async def extract_media_items(self, transcript: str) -> List[ExtractedMediaItem]:
         """
@@ -45,7 +53,7 @@ class LLMService:
 
         try:
             response = await self.client.chat.completions.create(
-                model=settings.DEFAULT_LLM_MODEL,
+                model=self._get_model_name(),
                 messages=[
                     {"role": "system", "content": system_instruction},
                     {"role": "user", "content": f"Transcript:\n{transcript}"}
@@ -90,7 +98,7 @@ class LLMService:
 
         try:
             response = await self.client.chat.completions.create(
-                model=settings.DEFAULT_LLM_MODEL,
+                model=self._get_model_name(),
                 messages=[
                     {"role": "system", "content": system_instruction},
                     {"role": "user", "content": f"Transcript:\n{transcript}\n\nUser Question: {user_prompt}"}
