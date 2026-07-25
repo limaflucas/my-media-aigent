@@ -18,13 +18,39 @@ services:
     networks:
       - mouseion_private
 
+  whisper:
+    image: hwdsl2/whisper-server:latest
+    environment:
+      - TZ=America/Halifax
+      - MODEL=base
+      - WHISPER_DEVICE=cpu
+      - COMPUTE_TYPE=int8   # CPU-friendly quantization, faster than float32
+      - WHISPER_API_KEY=${WHISPER_API_KEY}
+    volumes:
+      - /mnt/docker-data/services/my-media-aigent/whisper:/var/lib/whisper
+    deploy:
+      placement:
+        constraints:
+          - node.hostname == vm-docker-zeus
+    restart: unless-stopped
+    networks:
+      - mouseion_private
+      - llms_private
+    secrets:
+      - whisper_api_key
+
 networks:
   mouseion_private:
     external: true
     name: mouseion_private
+  llms_private:
+    external: true
+    name: llms_private
 
 secrets:
   telegram_bot_token:
     external: true
   overseerr_api_key:
+    external: true
+  whisper_api_key:
     external: true

@@ -1,3 +1,9 @@
+"""HTML Scraper and URL Metadata Parser Service.
+
+Extracts titles, release years, and media types from various streaming services,
+movie databases, and web pages (IMDb, Letterboxd, TMDB, MyAnimeList, AniList, Netflix, etc.).
+"""
+
 import re
 import json
 import logging

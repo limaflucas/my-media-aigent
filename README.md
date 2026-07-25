@@ -1,144 +1,135 @@
-# Movie Request Agent: Telegram + Seerr (Overseerr) Docker App
+# Movie Request Agent (`my-media-aigent`)
 
-A Dockerized Python application that parses media links sent to a Telegram bot, extracts the media information (Film, TV Show, or Anime), matches it against the Seerr API.
-
-## Features
-
-- **Link Scraping & Parsing:** Automatically extracts media titles and release years from movie databases, streaming services, and anime sites (IMDb, Letterboxd, TMDB, MyAnimeList, AniList, Netflix, etc.).
-- **Smart Direct Bypass:** Directly queries Overseerr if a direct TMDB link is provided, skipping the search phase.
-- **Top 5 Selection Keyboard:** Returns the top 5 results sorted by year/media type matching, allowing the user to select the correct media.
-- **Detailed Preview:** Shows a preview of the plot, type, and current library availability status in Seerr (`Available`, `Processing`, `Pending Approval`, or `Not Requested`).
+A production-ready, modular, fault-tolerant Python Telegram Bot and AI assistant that parses media links, searches and requests content via Overseerr/Seerr, and performs AI-powered video transcript summarization using a local LiteLLM instance.
 
 ---
 
-## Architecture
+## 🏗️ Architecture Target & Overview
 
 ```mermaid
 graph TD
-    User([Telegram User]) <-->|Send Link / Request| Bot[Telegram Bot Container]
-    Bot -->|1. Parse URL & Scrape Info| TargetSite[IMDb / Letterboxd / TMDB / MAL / etc.]
-    Bot -->|2. Search & Fetch Status| Seerr[Overseerr Container]
-    Bot -->|3. Submit POST Request| Seerr
-    Seerr -->|4. Sync & Monitor| PlexRadarrSonarr[(Plex, Radarr, Sonarr)]
+    User([Telegram User]) <-->|Send Link / Request / Video| Bot[Telegram Bot Application]
+    Bot -->|1. Parse URL / Extract Media Metadata| Scraper[Web Scrapers & oEmbed / JSON-LD]
+    Bot -->|2. Search, Request & Manage Media| Overseerr[Overseerr / Seerr API]
+    Bot -->|3. Extract Video Transcript / Audio| Extractor[YouTube Caption / yt-dlp Audio]
+    Bot -->|4. AI Transcript Summarization| LiteLLM[LiteLLM / Local AI Service]
+    Overseerr -->|Sync & Download| Servarr[(Plex, Radarr, Sonarr)]
+```
+
+### Directory Structure
+
+```
+my-media-aigent/
+├── config.py                 # Centralized Pydantic Settings (Validation & Env Vars)
+├── bot/
+│   ├── main.py               # Application entry point & bot lifecycle
+│   ├── middleware.py         # Global error boundaries & authorization middleware
+│   ├── parser.py            # Link parsing & web metadata scrapers
+│   └── handlers/             # Decoupled Telegram command/message handlers
+│       ├── __init__.py
+│       ├── overseerr.py      # Overseerr media search, links, & request management
+│       └── video.py          # YouTube & Instagram AI extraction handlers
+├── services/                 # Independent business logic & HTTP clients
+│   ├── __init__.py
+│   ├── overseerr.py          # Resilient Overseerr AsyncClient
+│   ├── llm.py                # LiteLLM client with token guardrails
+│   └── extractor.py          # YouTube & Instagram media extraction service
+├── models/                   # Pydantic schemas and domain DTOs
+│   ├── __init__.py
+│   └── media.py
+├── dev_tools/
+│   └── watch.py             # Hot-reload development script
+├── Dockerfile                # Hardened container definition with ffmpeg
+├── compose.yaml              # Docker Compose deployment definition
+└── requirements.txt          # Python dependencies
 ```
 
 ---
 
-## Getting Started
+## 🚀 Key Features
 
-### 1. Prerequisites
-Ensure you have [Docker](https://www.docker.com/) and [Docker Compose](https://docs.docker.com/compose/) installed on your machine.
+1. **Smart Link Scraping & Media Requesting:** Automatically extracts titles and metadata from IMDb, Letterboxd, TMDB, MyAnimeList, AniList, Netflix, etc., and searches Overseerr.
+2. **Direct TMDB Bypass & Confirmation Cards:** Instant match for direct TMDB links with rich confirmation cards containing posters, rating scores (TMDb, RT, IMDb), classification, runtime, directors, and streaming provider icons (Netflix, Max, Prime Video, Disney+, etc.).
+3. **AI Video Media Extraction & Interactive Selection:** Extract captions from YouTube videos/shorts or audio from Instagram Reels (`yt-dlp` + `ffmpeg`), analyze the video transcript with LiteLLM (`DEFAULT_LLM_MODEL`) to identify all mentioned movies/TV shows, search Overseerr for matches, and present an interactive selection list for direct library requesting.
+4. **Overseerr Request Management (`/seerr`):** View recent requests, approve, decline, retry failed requests (with exponential backoff retries), or delete requests directly within Telegram.
+5. **Centralized Configuration & Resilience:** Strict startup validation via Pydantic `BaseSettings`, Docker secrets support, and `httpx.AsyncClient` with custom timeouts and error boundaries.
 
-### 2. Setup the Telegram Bot
-1. Open Telegram and search for `@BotFather`.
-2. Send `/newbot` and follow the steps to name your bot.
-3. Save the HTTP API **Bot Token** provided (e.g., `123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ`).
+---
 
-### 3. Create Secret Files
-Instead of using environment files, this project uses Docker secrets. Create two text files in the root of your project:
-1. `telegram_bot_token.txt` containing only your Telegram Bot Token.
-2. `overseerr_api_key.txt` containing only your Overseerr/Seerr API Key.
+## ⚙️ Configuration Parameters (`config.py`)
 
-For example, to create them:
+All settings are configured via `.env` files, environment variables, or Docker secrets.
+
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `TELEGRAM_BOT_TOKEN` | `SecretStr` | Required | Telegram bot token from `@BotFather`. |
+| `TELEGRAM_ALLOWED_USERS` | `list[int]` | `[]` | Optional whitelist of Telegram user IDs. Empty allows all users. |
+| `OVERSEERR_URL` | `HttpUrl` | Required | Base URL of your Overseerr/Seerr instance. |
+| `OVERSEERR_API_KEY` | `SecretStr` | Required | Overseerr API Key. |
+| `OVERSEERR_TIMEOUT` | `float` | `10.0` | HTTP request timeout in seconds for Overseerr API calls. |
+| `OVERSEERR_SSL_VERIFY`| `bool` | `True` | Whether to verify SSL certificates for Overseerr requests. |
+| `LITELLM_BASE_URL` | `str` | Required | OpenAI-compatible endpoint for local LiteLLM service. |
+| `LITELLM_API_KEY` | `SecretStr` | Required | API Key for LiteLLM service. |
+| `DEFAULT_LLM_MODEL` | `str` | Required | LLM model name used for transcript analysis. |
+| `MAX_TRANSCRIPT_TOKENS`| `int` | `3000` | Token guardrail to prevent local GPU OOM context crashes. |
+| `LOG_LEVEL` | `str` | `"INFO"` | Application logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`). |
+
+### Docker Secrets & File Loading
+
+The application automatically checks for secrets in the following order:
+1. `<KEY>_FILE` environment variable path (e.g. `TELEGRAM_BOT_TOKEN_FILE=/path/to/token.txt`).
+2. Docker secrets default directory (`/run/secrets/telegram_bot_token`, `/run/secrets/overseerr_api_key`).
+3. Direct environment variable (`TELEGRAM_BOT_TOKEN`, `OVERSEERR_API_KEY`).
+
+---
+
+## 🛠️ Getting Started
+
+### 1. Create Secret Files (Optional if using direct env)
+
 ```bash
 echo "YOUR_TELEGRAM_BOT_TOKEN" > telegram_bot_token.txt
 echo "YOUR_OVERSEERR_API_KEY" > overseerr_api_key.txt
 ```
-*(Note: You can leave `overseerr_api_key.txt` empty initially, run the stack to set up Seerr, retrieve the key from Seerr's settings, and then paste it into the file.)*
 
-> [!IMPORTANT]
-> **Security Warning:** Both `telegram_bot_token.txt` and `overseerr_api_key.txt` contain highly sensitive API keys. They are ignored by `.gitignore` to prevent them from being committed to Git. Keep these files protected and never share them.
+### 2. Run with Docker Compose
 
-
-
-### 4. Run the Docker Containers
-Launch the stack using Docker Compose:
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
-This command will build the bot image and start two containers:
-1. **`overseerr-app`:** The Seerr interface, accessible at `http://localhost:5055`.
-2. **`movie-request-bot`:** The Telegram bot service.
-
-### 5. Configure Seerr & Retrieve API Key
-If this is a fresh setup:
-1. Open `http://localhost:5055` in your browser.
-2. Sign in with your Plex account or local credentials and complete the initial setup (link your Plex library and connect Radarr/Sonarr as required).
-3. Navigate to **Settings > General** in the Overseerr UI.
-4. Scroll down to the **API** section and click **Generate** next to **API Key**.
-5. Copy the generated key, paste it into your `overseerr_api_key.txt` file, and restart the bot container:
-   ```bash
-   docker compose up -d --build bot
-   ```
 
 ---
 
-## How to Use the Telegram Bot
+## 📱 Telegram Usage Guide
 
-1. **Start the Bot**: Open your Telegram bot and click **Start** or send `/start`.
-2. **Request via Links**: Paste any movie or TV show link from a supported website:
-   - **IMDb:** `https://www.imdb.com/title/tt0111161/`
-   - **Letterboxd:** `https://letterboxd.com/film/the-batman/`
-   - **TMDB:** `https://www.themoviedb.org/movie/278-the-shawshank-redemption`
-   - **MyAnimeList:** `https://myanimelist.net/anime/5114/Fullmetal_Alchemist__Brotherhood`
-   - **Netflix:** `https://www.netflix.com/title/80057281`
-3. **Request via Search**: Alternatively, search for media directly by typing its title (e.g., `The Shawshank Redemption`).
-4. **Confirm Request**: The bot directly routes your selection to a rich **Confirm Request** card showing:
-   - **Tagline** and **Plot Overview**.
-   - **Ratings**: Live ratings aggregated from TMDb, Rotten Tomatoes (both critics & audience), and IMDb.
-   - **Metadata**: Genres, regional classification (BR/US), runtime/duration, and directors/creators.
-   - **Where to Watch**: A list of available streaming platforms with beautiful, custom-branded icons (e.g. 🔴 Netflix, 🟣 Max, 🔵 Prime Video).
-5. **Manage Requests (`/seerr` command)**:
-   - `/seerr ?`: List all available request management commands.
-   - `/seerr list`: List the last 5 media requests from Seerr.
-   - `/seerr [number]`: List the last custom number of requests (between 1 and 20).
-   - *Note:* From the lists, admins can view details, approve, decline, retry failed requests (with built-in exponential backoff), or delete them.
+1. **Start Bot:** Send `/start` to view the welcome message and supported features.
+2. **Request Media via Links or Title:**
+   - **Send a link:** `https://www.imdb.com/title/tt0111161/` or `https://themoviedb.org/movie/278`
+   - **Type a title:** `Inception (2010)` or `Breaking Bad`
+3. **Summarize Video Content:**
+   - Send any YouTube video/shorts link or Instagram Reel URL to automatically trigger transcript extraction and AI summarization.
+4. **Manage Overseerr Requests:**
+   - `/seerr list`: List the last 5 media requests on Seerr.
+   - `/seerr [number]`: List the last `N` media requests (1-20).
+   - `/seerr ?`: Show help message for requests management.
 
 ---
 
-## Development & Dev Tools
+## 🧑‍💻 Local Development
 
-For local development and testing, you can run the bot outside of Docker with auto-reload enabled:
-
-### 1. Install Dependencies
-Make sure you have your virtual environment active and dependencies installed:
 ```bash
-python -m venv .venv
+# Create and activate virtual environment
+python3 -m venv .venv
 source .venv/bin/activate
+
+# Install dependencies
 pip install -r requirements.txt
-```
 
-### 2. Export Configuration Variables
-Set up your local credentials matching your target environment:
-```bash
-export OVERSEERR_URL="https://catalog.homelab"
-export OVERSEERR_API_KEY="your_api_key_here"
-export TELEGRAM_BOT_TOKEN="your_bot_token_here"
-```
+# Export environment variables
+export TELEGRAM_BOT_TOKEN="your_bot_token"
+export OVERSEERR_API_KEY="your_overseerr_api_key"
+export OVERSEERR_URL="http://localhost:5055"
 
-### 3. Start the Hot-Reloading Watcher
-Run the custom watcher utility to automatically detect changes in the `bot/` directory and restart the service on the fly:
-```bash
+# Run development hot-reload watcher
 python dev_tools/watch.py
-```
-
----
-
-## Directory Structure
-
-```
-my-movie-agent/
-├── docker-compose.yml       # Configuration for bot and Overseerr containers
-├── Dockerfile               # Production Dockerfile for the Telegram bot
-├── requirements.txt         # Python libraries
-├── telegram_bot_token.txt   # File containing the Telegram Bot Token (Docker Secret)
-├── overseerr_api_key.txt    # File containing the Seerr/Overseerr API Key (Docker Secret)
-├── README.md                # System documentation
-├── dev_tools/
-│   └── watch.py             # Local development hot-reload watcher script
-└── bot/
-    ├── __init__.py          # Bot package initializer
-    ├── main.py              # Main bot execution and telegram handlers
-    ├── parser.py            # Link parsing and HTML scrapers
-    └── overseerr.py         # Overseerr API interface client
 ```
