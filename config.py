@@ -1,3 +1,9 @@
+"""Centralized configuration engine using Pydantic Settings.
+
+Validates application environment variables, loads local .env files,
+resolves Docker secrets, and formats human-readable error messages on failure.
+"""
+
 import os
 import sys
 import logging
@@ -6,6 +12,15 @@ from pydantic import HttpUrl, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
+
+VAR_EXAMPLES = {
+    "TELEGRAM_BOT_TOKEN": "123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ (or TELEGRAM_BOT_TOKEN_FILE / Docker secret)",
+    "OVERSEERR_URL": "http://seerr:5055",
+    "OVERSEERR_API_KEY": "your_overseerr_api_key (or OVERSEERR_API_KEY_FILE / Docker secret)",
+    "LITELLM_BASE_URL": "http://litellm:4000/v1",
+    "LITELLM_API_KEY": "sk-litellm-dummy (or LITELLM_API_KEY_FILE / Docker secret)",
+    "DEFAULT_LLM_MODEL": "gemma4-fit",
+}
 
 
 def _read_secret(key: str) -> Optional[str]:
@@ -35,6 +50,8 @@ def _read_secret(key: str) -> Optional[str]:
 
 
 class Settings(BaseSettings):
+    """Pydantic Settings definition for application configuration parameters."""
+
     # Telegram Configuration
     TELEGRAM_BOT_TOKEN: SecretStr
     TELEGRAM_ALLOWED_USERS: List[int] = []
@@ -55,7 +72,7 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(".env", "../.env"),
         env_file_encoding="utf-8",
         extra="ignore"
     )
@@ -63,6 +80,7 @@ class Settings(BaseSettings):
     @field_validator("TELEGRAM_BOT_TOKEN", "OVERSEERR_API_KEY", "LITELLM_API_KEY", mode="after")
     @classmethod
     def validate_non_empty_secret(cls, v: SecretStr) -> SecretStr:
+        """Ensures secret values are not empty strings."""
         if not v.get_secret_value().strip():
             raise ValueError("Secret value cannot be empty")
         return v
@@ -70,12 +88,13 @@ class Settings(BaseSettings):
     @field_validator("LITELLM_BASE_URL", "DEFAULT_LLM_MODEL", mode="after")
     @classmethod
     def validate_non_empty_str(cls, v: str) -> str:
+        """Ensures configuration string values are not empty."""
         if not v.strip():
             raise ValueError("Configuration string cannot be empty")
         return v.strip()
 
     def __init__(self, **kwargs):
-        # Resolve secrets from docker / file if not explicitly passed
+        """Initializes settings, resolving Docker/file secrets if not explicitly provided."""
         for secret_key in ["TELEGRAM_BOT_TOKEN", "OVERSEERR_API_KEY", "LITELLM_API_KEY"]:
             if secret_key not in kwargs or not kwargs.get(secret_key):
                 val = _read_secret(secret_key)
@@ -86,29 +105,38 @@ class Settings(BaseSettings):
 
 
 def load_settings() -> Settings:
-    """Loads settings with clear, user-friendly error formatting on failure."""
+    """Loads application settings with clear, pinpointed error messages for missing variables."""
     try:
         return Settings()
     except ValidationError as e:
-        missing_vars = []
+        missing_lines = []
         for error in e.errors():
-            loc = " -> ".join(str(loc_item) for loc_item in error.get("loc", []))
-            msg = error.get("msg", "")
-            missing_vars.append(f"  • {loc}: {msg}")
+            loc_list = error.get("loc", [])
+            var_name = str(loc_list[0]) if loc_list else "UNKNOWN"
+            msg = error.get("msg", "Field required or invalid")
+            example = VAR_EXAMPLES.get(var_name, "your_value_here")
+
+            missing_lines.append(
+                f"  ❌ {var_name}\n"
+                f"     Reason: {msg}\n"
+                f"     Example: {var_name}={example}\n"
+            )
+
+        env_file_path = os.path.abspath(".env")
+        if os.path.exists(".env"):
+            env_file_status = f"Found .env file at: {env_file_path}"
+        else:
+            env_file_status = "No .env file found in current working directory."
 
         error_message = (
-            "\n" + "=" * 65 + "\n"
+            "\n" + "=" * 67 + "\n"
             "❌ CONFIGURATION ERROR: Missing or invalid environment variables!\n"
-            "The application cannot start because required settings are missing:\n\n"
-            + "\n".join(missing_vars) + "\n\n"
-            "Please provide the required values in your environment, .env file, or Docker secrets:\n"
-            "  - TELEGRAM_BOT_TOKEN  (or TELEGRAM_BOT_TOKEN_FILE / Docker secret)\n"
-            "  - OVERSEERR_URL       (e.g., http://seerr:5055)\n"
-            "  - OVERSEERR_API_KEY   (or OVERSEERR_API_KEY_FILE / Docker secret)\n"
-            "  - LITELLM_BASE_URL    (e.g., http://litellm:4000/v1)\n"
-            "  - LITELLM_API_KEY     (or LITELLM_API_KEY_FILE / Docker secret)\n"
-            "  - DEFAULT_LLM_MODEL   (e.g., gemma4-fit)\n"
-            + "=" * 65 + "\n"
+            "The application cannot start because the following required setting(s) are missing or invalid:\n\n"
+            + "\n".join(missing_lines) + "\n"
+            "💡 How to fix:\n"
+            "   Add the missing variable(s) to your OS environment, Docker secrets, or a .env file.\n"
+            f"   {env_file_status}\n"
+            + "=" * 67 + "\n"
         )
         sys.stderr.write(error_message)
         sys.exit(1)
