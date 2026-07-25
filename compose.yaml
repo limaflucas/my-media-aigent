@@ -22,6 +22,7 @@ services:
       - overseerr_api_key
     networks:
       - mouseion_private
+      - llms_private
 
   whisper:
     image: hwdsl2/whisper-server:latest
@@ -36,7 +37,7 @@ services:
     deploy:
       placement:
         constraints:
-          - node.hostname == vm-docker-zeus
+          - node.hostname != vm-docker-bragi
     restart: unless-stopped
     networks:
       - mouseion_private
