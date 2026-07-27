@@ -1,24 +1,33 @@
 """Media extraction service for video content processing.
 
-Provides Unified extraction interfaces for YouTube caption scraping and Instagram Reel
-audio download (via yt-dlp) followed by AI Speech-to-Text transcription.
+Provides Unified extraction interfaces for YouTube caption scraping, Instagram Reel audio download,
+and video description extraction, followed by AI Speech-to-Text transcription via LiteLLM/Whisper.
 """
 
 import re
 import os
 import asyncio
 import logging
+from typing import Optional, Tuple
 from youtube_transcript_api import YouTubeTranscriptApi
 import yt_dlp
 from openai import AsyncOpenAI
 from pydantic import SecretStr
+
 from config import settings
+from models.media import VideoContentData
 
 logger = logging.getLogger(__name__)
 
+WHISPER_TRANSCRIBE_PROMPT = (
+    "Transcrição de áudio sobre filmes, séries, cinema e entretenimento em Português, Inglês ou Francês. "
+    "Audio transcription about movies, TV shows, cinema and entertainment in English, Portuguese, or French. "
+    "Transcription audio sur les films, séries, cinéma et divertissement en Français."
+)
+
 
 class MediaExtractorService:
-    """Service for pulling transcripts and audio from video platforms (YouTube, Instagram)."""
+    """Service for pulling transcripts, video descriptions, and audio from platforms (YouTube, Instagram)."""
 
     def __init__(self) -> None:
         """Initializes the MediaExtractorService with LiteLLM OpenAI client."""
@@ -39,35 +48,51 @@ class MediaExtractorService:
         """Checks if the given URL belongs to an Instagram Reel, Post, or TV video."""
         return "instagram.com/reel" in url or "instagram.com/p" in url or "instagram.com/tv" in url
 
-    async def extract_transcript(self, url: str) -> str:
-        """Main dispatcher for video transcript extraction based on platform.
+    async def extract_video_data(self, url: str) -> VideoContentData:
+        """Main dispatcher for video transcript, title, and description extraction based on platform.
 
         Args:
-            url: The video URL to extract transcript from.
+            url: The video URL to extract data from.
 
         Returns:
-            Extracted video transcript text string.
+            VideoContentData DTO containing transcript, description, and title.
 
         Raises:
             ValueError: If the platform URL is unsupported.
         """
         if self.is_youtube(url):
-            return await self._extract_youtube(url)
+            return await self._extract_youtube_data(url)
         elif self.is_instagram(url):
-            return await self._extract_instagram(url)
+            return await self._extract_instagram_data(url)
         else:
             raise ValueError("Unsupported media URL platform for extraction.")
 
-    async def _extract_youtube(self, url: str) -> str:
-        """Extracts captions from YouTube using YouTubeTranscriptApi.
+    async def extract_transcript(self, url: str) -> str:
+        """Backwards-compatible wrapper returning only the extracted transcript string."""
+        data = await self.extract_video_data(url)
+        return data.transcript
 
-        Args:
-            url: YouTube video URL.
+    def _fetch_yt_dlp_metadata(self, url: str) -> Tuple[Optional[str], Optional[str]]:
+        """Scrapes video description and title using yt-dlp metadata extraction."""
+        ydl_opts = {
+            'skip_download': True,
+            'quiet': True,
+            'no_warnings': True,
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                if info:
+                    desc = info.get("description") or info.get("caption")
+                    title = info.get("title")
+                    return desc, title
+        except Exception as e:
+            logger.warning(f"yt-dlp metadata extraction failed for {url}: {e}")
+        return None, None
 
-        Returns:
-            Full transcript text string.
-        """
-        def _get():
+    async def _extract_youtube_data(self, url: str) -> VideoContentData:
+        """Extracts captions and video description from YouTube."""
+        def _get_transcript():
             video_id_match = re.search(r'(?:v=|\/|shorts\/)([0-9A-Za-z_-]{11})', url)
             if not video_id_match:
                 raise ValueError("Invalid YouTube URL: could not extract video ID.")
@@ -95,21 +120,31 @@ class MediaExtractorService:
                     text_parts.append(str(s))
             return " ".join(text_parts)
 
-        try:
-            return await asyncio.to_thread(_get)
-        except Exception as e:
-            logger.error(f"Failed to extract YouTube transcript from {url}: {e}")
-            raise RuntimeError(f"Could not retrieve YouTube transcript: {e}") from e
+        # Execute transcript extraction and metadata scraping concurrently
+        transcript_task = asyncio.to_thread(_get_transcript)
+        metadata_task = asyncio.to_thread(self._fetch_yt_dlp_metadata, url)
 
-    async def _extract_instagram(self, url: str) -> str:
-        """Downloads audio using yt-dlp and transcribes it via LiteLLM/Whisper.
+        results = await asyncio.gather(transcript_task, metadata_task, return_exceptions=True)
 
-        Args:
-            url: Instagram Reel or Post URL.
+        transcript_res = results[0]
+        metadata_res = results[1]
 
-        Returns:
-            Transcribed text from video audio.
-        """
+        if isinstance(transcript_res, Exception):
+            logger.error(f"Failed to extract YouTube transcript from {url}: {transcript_res}")
+            raise RuntimeError(f"Could not retrieve YouTube transcript: {transcript_res}") from transcript_res
+
+        description, title = (None, None)
+        if isinstance(metadata_res, tuple):
+            description, title = metadata_res
+
+        return VideoContentData(
+            transcript=transcript_res,
+            description=description,
+            title=title
+        )
+
+    async def _extract_instagram_data(self, url: str) -> VideoContentData:
+        """Downloads audio using yt-dlp, extracts post description, and transcribes audio via LiteLLM/Whisper."""
         out_path = f"/tmp/ig_{hash(url)}.mp3"
         ydl_opts = {
             'format': 'bestaudio/best',
@@ -122,23 +157,29 @@ class MediaExtractorService:
             'quiet': True,
         }
 
-        def _download():
+        def _download_and_extract_metadata():
+            desc = None
+            title = None
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
-            return out_path
+                info = ydl.extract_info(url, download=True)
+                if info:
+                    desc = info.get("description") or info.get("caption")
+                    title = info.get("title")
+            return out_path, desc, title
 
-        logger.info(f"Downloading audio for IG Reel: {url}")
-        audio_file = await asyncio.to_thread(_download)
+        logger.info(f"Downloading audio and metadata for IG Reel: {url}")
+        audio_file, description, title = await asyncio.to_thread(_download_and_extract_metadata)
 
         try:
-            logger.info("Sending audio to LiteLLM/Whisper for transcription...")
+            logger.info("Sending audio to LiteLLM/Whisper for transcription with multilingual prompt...")
             with open(audio_file, "rb") as file_payload:
                 transcription = await self.ai_client.audio.transcriptions.create(
                     model="whisper-1",
                     file=file_payload,
+                    prompt=WHISPER_TRANSCRIBE_PROMPT,
                     response_format="text"
                 )
-            result_text = transcription
+            result_text = str(transcription)
         except Exception as e:
             logger.error(f"Transcription failed: {e}")
             result_text = f"Transcription failed: {str(e)}"
@@ -146,4 +187,8 @@ class MediaExtractorService:
             if os.path.exists(audio_file):
                 os.remove(audio_file)
 
-        return result_text
+        return VideoContentData(
+            transcript=result_text,
+            description=description,
+            title=title
+        )

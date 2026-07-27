@@ -18,7 +18,7 @@ overseerr = OverseerrClient()
 
 
 async def handle_video_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Handles YouTube and Instagram links by extracting transcript, identifying movies/shows via LLM,
+    """Handles YouTube and Instagram links by extracting transcript and description, identifying movies/shows via LLM,
     searching Overseerr concurrently, and presenting interactive search results.
 
     Args:
@@ -35,15 +35,18 @@ async def handle_video_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if not (extractor_service.is_youtube(text) or extractor_service.is_instagram(text)):
         return False
 
-    status_msg = await update.message.reply_text("⏳ Extracting video transcript...")
+    status_msg = await update.message.reply_text("⏳ Extracting video content & transcript...")
 
     try:
-        # 1. Extract transcript
-        transcript = await extractor_service.extract_transcript(text)
-        await status_msg.edit_text("🤖 Analyzing video content for movies & TV shows...")
+        # 1. Extract transcript and video description
+        video_data = await extractor_service.extract_video_data(text)
+        await status_msg.edit_text("🤖 Analyzing video transcript & description for movies & TV shows...")
 
-        # 2. Extract media items mentioned in video using LLM
-        extracted_items = await llm_service.extract_media_items(transcript)
+        # 2. Extract media items mentioned in video using LLM (transcript + description)
+        extracted_items = await llm_service.extract_media_items(
+            transcript=video_data.transcript,
+            description=video_data.description
+        )
         if not extracted_items:
             await status_msg.edit_text("ℹ️ No movies or TV shows were identified in this video.")
             return True

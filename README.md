@@ -50,7 +50,7 @@ my-media-aigent/
 
 1. **Smart Link Scraping & Media Requesting:** Automatically extracts titles and metadata from IMDb, Letterboxd, TMDB, MyAnimeList, AniList, Netflix, etc., and searches Overseerr.
 2. **Direct TMDB Bypass & Confirmation Cards:** Instant match for direct TMDB links with rich confirmation cards containing posters, rating scores (TMDb, RT, IMDb), classification, runtime, directors, and streaming provider icons (Netflix, Max, Prime Video, Disney+, etc.).
-3. **AI Video Media Extraction & Interactive Selection:** Extract captions from YouTube videos/shorts or audio from Instagram Reels (`yt-dlp` + `ffmpeg`), analyze the video transcript with LiteLLM (`DEFAULT_LLM_MODEL`) to identify all mentioned movies/TV shows, search Overseerr for matches, and present an interactive selection list for direct library requesting.
+3. **AI Video & Description Extraction:** Scrapes video transcripts and metadata descriptions from YouTube and Instagram Reels (`yt-dlp` + `ffmpeg`), uses a multilingual prompt (PT-BR, EN, FR) for Whisper STT audio transcription (`audio.transcriptions.create`), and analyzes both transcript and post description via LiteLLM (`DEFAULT_LLM_MODEL`) to identify mentioned movies/TV shows for direct Overseerr requesting.
 4. **Overseerr Request Management (`/seerr`):** View recent requests, approve, decline, retry failed requests (with exponential backoff retries), or delete requests directly within Telegram.
 5. **Centralized Configuration & Resilience:** Strict startup validation via Pydantic `BaseSettings`, Docker secrets support, and `httpx.AsyncClient` with custom timeouts and error boundaries.
 

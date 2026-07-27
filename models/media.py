@@ -51,6 +51,13 @@ class VideoMediaExtractionResult(BaseModel):
     media_items: List[ExtractedMediaItem] = Field(default_factory=list)
 
 
+class VideoContentData(BaseModel):
+    """Container DTO for extracted transcript, description, and metadata from a video link."""
+    transcript: str
+    description: Optional[str] = None
+    title: Optional[str] = None
+
+
 class TranscriptAnalysisRequest(BaseModel):
     """Request DTO for transcript analysis."""
     url: str
