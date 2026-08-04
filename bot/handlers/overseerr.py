@@ -651,10 +651,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     message_text = update.message.text.strip()
 
-    # Try processing via Video AI handler first if YouTube or Instagram
+    # Try processing via Video AI handler first if YouTube, Instagram, or Facebook
     from bot.handlers.video import handle_video_message
     video_handled = await handle_video_message(update, context)
     if video_handled:
+        return
+
+    # No video stream available: try the social post pipeline (Instagram/Facebook photo & text posts)
+    from bot.handlers.post import handle_post_message
+    post_handled = await handle_post_message(update, context)
+    if post_handled:
         return
 
     # Look for URLs in the message

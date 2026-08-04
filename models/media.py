@@ -58,6 +58,18 @@ class VideoContentData(BaseModel):
     title: Optional[str] = None
 
 
+class SocialPostContent(BaseModel):
+    """Container DTO for content scraped from an Instagram/Facebook post carrying no video stream."""
+    description: Optional[str] = None
+    title: Optional[str] = None
+    images: List[str] = Field(default_factory=list)
+
+    @property
+    def has_content(self) -> bool:
+        """True when the post yielded caption text or an image usable for identification."""
+        return bool((self.description or "").strip() or self.images)
+
+
 class TranscriptAnalysisRequest(BaseModel):
     """Request DTO for transcript analysis."""
     url: str

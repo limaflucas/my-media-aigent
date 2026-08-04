@@ -26,8 +26,41 @@ WHISPER_TRANSCRIBE_PROMPT = (
 )
 
 
+class NoVideoStreamError(Exception):
+    """Raised when a link carries no downloadable video stream.
+
+    Expected for Instagram/Facebook photo and text posts, which the social post pipeline handles.
+    Not an error condition: it is the signal that routes a link onward.
+    """
+
+
+class _YtDlpLogger:
+    """Routes yt-dlp's own console output into this module's logger instead of stderr.
+
+    yt-dlp reports errors to stderr regardless of its `quiet` option. Failures surface through the
+    raised exception, so its output is demoted to debug to keep the application log readable.
+    """
+
+    @staticmethod
+    def debug(msg: str) -> None:
+        logger.debug(msg)
+
+    @staticmethod
+    def info(msg: str) -> None:
+        logger.debug(msg)
+
+    @staticmethod
+    def warning(msg: str) -> None:
+        logger.debug(msg)
+
+    @staticmethod
+    def error(msg: str) -> None:
+        logger.debug(msg)
+
+
 class MediaExtractorService:
-    """Service for pulling transcripts, video descriptions, and audio from platforms (YouTube, Instagram)."""
+    """Service for pulling transcripts, video descriptions, and audio from platforms
+    (YouTube, Instagram, Facebook)."""
 
     def __init__(self) -> None:
         """Initializes the MediaExtractorService with LiteLLM OpenAI client."""
@@ -48,6 +81,11 @@ class MediaExtractorService:
         """Checks if the given URL belongs to an Instagram Reel, Post, or TV video."""
         return "instagram.com/reel" in url or "instagram.com/p" in url or "instagram.com/tv" in url
 
+    @staticmethod
+    def is_facebook(url: str) -> bool:
+        """Checks if the given URL belongs to Facebook video content."""
+        return "facebook.com" in url or "fb.watch" in url
+
     async def extract_video_data(self, url: str) -> VideoContentData:
         """Main dispatcher for video transcript, title, and description extraction based on platform.
 
@@ -62,8 +100,8 @@ class MediaExtractorService:
         """
         if self.is_youtube(url):
             return await self._extract_youtube_data(url)
-        elif self.is_instagram(url):
-            return await self._extract_instagram_data(url)
+        elif self.is_instagram(url) or self.is_facebook(url):
+            return await self._extract_audio_transcription_data(url)
         else:
             raise ValueError("Unsupported media URL platform for extraction.")
 
@@ -78,6 +116,7 @@ class MediaExtractorService:
             'skip_download': True,
             'quiet': True,
             'no_warnings': True,
+            'logger': _YtDlpLogger(),
         }
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -143,9 +182,13 @@ class MediaExtractorService:
             title=title
         )
 
-    async def _extract_instagram_data(self, url: str) -> VideoContentData:
-        """Downloads audio using yt-dlp, extracts post description, and transcribes audio via LiteLLM/Whisper."""
-        out_path = f"/tmp/ig_{hash(url)}.mp3"
+    async def _extract_audio_transcription_data(self, url: str) -> VideoContentData:
+        """Downloads audio using yt-dlp, extracts the description, and transcribes audio via LiteLLM/Whisper.
+
+        Serves any platform whose media yt-dlp can download (Instagram Reels, Facebook videos). Raises
+        if the link carries no video stream, which routes the link on to the social post pipeline.
+        """
+        out_path = f"/tmp/social_{hash(url)}.mp3"
         ydl_opts = {
             'format': 'bestaudio/best',
             'postprocessors': [{
@@ -155,6 +198,8 @@ class MediaExtractorService:
             }],
             'outtmpl': out_path.replace('.mp3', ''),
             'quiet': True,
+            'no_warnings': True,
+            'logger': _YtDlpLogger(),
         }
 
         def _download_and_extract_metadata():
@@ -167,8 +212,13 @@ class MediaExtractorService:
                     title = info.get("title")
             return out_path, desc, title
 
-        logger.info(f"Downloading audio and metadata for IG Reel: {url}")
-        audio_file, description, title = await asyncio.to_thread(_download_and_extract_metadata)
+        logger.info(f"Downloading audio and metadata for: {url}")
+        try:
+            audio_file, description, title = await asyncio.to_thread(_download_and_extract_metadata)
+        except yt_dlp.utils.DownloadError as e:
+            # No stream to transcribe (photo/text post, private, or unavailable). The message is
+            # self-describing, so it is raised as a routing signal rather than a logged failure.
+            raise NoVideoStreamError(str(e)) from e
 
         try:
             logger.info("Sending audio to LiteLLM/Whisper for transcription with multilingual prompt...")
